@@ -204,6 +204,24 @@ mod test {
             for (i, v) in allocations.iter().enumerate() {
                 assert_eq!(i, v.as_ptr().read())
             }
+
+            for _ in 0..500 {
+                allocations.pop();
+                alloc.pop_deallocate();
+            }
+
+            let mut allocations_2 = Vec::new();
+
+            for i in 0..1000 {
+                let alloc = alloc.alloc::<u128>();
+                alloc.as_ptr().write(i as u128);
+                assert!(!allocations_2.contains(&alloc));
+                allocations_2.push(alloc);
+            }
+
+            for (i, v) in allocations_2.iter().enumerate() {
+                assert_eq!(i as u128, v.as_ptr().read())
+            }
         }
     }
 }

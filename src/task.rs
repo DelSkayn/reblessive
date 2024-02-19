@@ -5,7 +5,7 @@ use std::{
     task::{Context, Poll},
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Task {
     ptr: NonNull<()>,
     dropper: unsafe fn(NonNull<()>),

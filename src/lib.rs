@@ -2,6 +2,9 @@ mod allocator;
 mod stub_ctx;
 mod task;
 
+#[cfg(test)]
+mod test;
+
 use std::{
     cell::UnsafeCell,
     future::Future,
@@ -14,13 +17,6 @@ use std::{
 use allocator::StackAllocator;
 use pin_project_lite::pin_project;
 use task::Task;
-
-/// A marker struct which marks a lifetime as invariant.
-///
-// Since 'inv required to be both contravariant as well as covariant the result is an invariant
-// lifetime.
-#[derive(Copy, Clone, Eq, PartialEq, PartialOrd, Ord, Hash, Debug, Default)]
-pub struct Invariant<'inv>(PhantomData<&'inv mut &'inv fn(&'inv ()) -> &'inv ()>);
 
 pin_project_lite::pin_project! {
     pub struct CtxFuture<'a, 's, F, R> {
@@ -44,14 +40,15 @@ where
         unsafe {
             if let Some(x) = this.f.take() {
                 let ctx = Ctx::new_ptr(*this.ptr);
-                let future_ptr = this.ptr.as_mut().allocator.alloc::<TaskFuture<Fut, R>>();
+
+                let future_ptr = (*this.ptr.as_ref().allocator.get()).alloc::<TaskFuture<Fut, R>>();
 
                 future_ptr.as_ptr().write(TaskFuture {
                     place: NonNull::from(this.res),
                     inner: (x)(ctx),
                 });
 
-                this.ptr.as_mut().tasks.push(Task::wrap_future(future_ptr));
+                (*this.ptr.as_ref().tasks.get()).push(Task::wrap_future(future_ptr));
                 return Poll::Pending;
             }
 
@@ -64,11 +61,11 @@ where
 }
 
 pin_project! {
-struct TaskFuture<F, R> {
-    place: NonNull<UnsafeCell<Option<R>>>,
-    #[pin]
-    inner: F,
-}
+    struct TaskFuture<F, R> {
+        place: NonNull<UnsafeCell<Option<R>>>,
+        #[pin]
+        inner: F,
+    }
 }
 
 impl<F, R> Future for TaskFuture<F, R>
@@ -133,24 +130,25 @@ impl<'a, R> Future for RunnerFuture<'a, R> {
         let this = self.project();
         unsafe {
             loop {
-                let tasks_len = this.runner.ptr.as_ref().tasks.len();
-                let Some(x) = this.runner.ptr.as_mut().tasks.last_mut() else {
+                let tasks = &this.runner.ptr.as_ref().tasks;
+                let tasks_len = (*tasks.get()).len();
+                let Some(x) = (*tasks.get()).last_mut() else {
                     panic!("Tasks empty")
                 };
 
                 match x.drive(cx) {
                     Poll::Pending => {
-                        if this.runner.ptr.as_ref().tasks.len() > tasks_len {
+                        if (*tasks.get()).len() > tasks_len {
                             continue;
                         }
                         return Poll::Pending;
                     }
                     Poll::Ready(_) => {
-                        let task = this.runner.ptr.as_mut().tasks.pop().unwrap();
+                        let task = (*tasks.get()).pop().unwrap();
                         task.drop();
-                        this.runner.ptr.as_mut().allocator.pop_deallocate();
-                        if this.runner.ptr.as_ref().tasks.is_empty() {
-                            let value = (*this.runner.place.get()).take().unwrap();
+                        (*this.runner.ptr.as_ref().allocator.get()).pop_deallocate();
+                        if (*tasks.get()).is_empty() {
+                            let value = (*this.runner.place.as_ref().get()).take().unwrap();
                             return Poll::Ready(value);
                         }
                     }
@@ -161,7 +159,7 @@ impl<'a, R> Future for RunnerFuture<'a, R> {
 }
 
 pub struct Runner<'a, R> {
-    place: Box<UnsafeCell<Option<R>>>,
+    place: NonNull<UnsafeCell<Option<R>>>,
     ptr: NonNull<Stack>,
     _stack_marker: PhantomData<&'a mut Stack>,
     _res_marker: PhantomData<R>,
@@ -179,7 +177,7 @@ impl<'a, R> Runner<'a, R> {
     pub fn step(&mut self) -> Option<R> {
         unsafe {
             {
-                let Some(x) = self.ptr.as_mut().tasks.last_mut() else {
+                let Some(mut x) = (*self.ptr.as_ref().tasks.get()).last().cloned() else {
                     panic!("Tasks empty")
                 };
                 let waker = stub_ctx::get();
@@ -191,18 +189,18 @@ impl<'a, R> Runner<'a, R> {
                 }
             }
 
-            let task = self.ptr.as_mut().tasks.pop().unwrap();
+            let task = (*self.ptr.as_ref().tasks.get()).pop().unwrap();
             task.drop();
-            self.ptr.as_mut().allocator.pop_deallocate();
-            if self.ptr.as_ref().tasks.is_empty() {
-                return Some((*self.place.get()).take().unwrap());
+            (*self.ptr.as_ref().allocator.get()).pop_deallocate();
+            if (*self.ptr.as_ref().tasks.get()).is_empty() {
+                return Some((*self.place.as_ref().get()).take().unwrap());
             }
         }
         None
     }
 
     pub fn depth(&self) -> usize {
-        unsafe { self.ptr.as_ref().tasks.len() }
+        unsafe { (*self.ptr.as_ref().tasks.get()).len() }
     }
 
     pub fn finish_async(self) -> RunnerFuture<'a, R> {
@@ -213,25 +211,26 @@ impl<'a, R> Runner<'a, R> {
 impl<'a, R> Drop for Runner<'a, R> {
     fn drop(&mut self) {
         unsafe {
-            let stack = self.ptr.as_mut();
-            while let Some(t) = stack.tasks.pop() {
+            let _ = Box::from_raw(self.place.as_ptr());
+            let stack = self.ptr.as_ref();
+            while let Some(t) = (*stack.tasks.get()).pop() {
                 t.drop();
-                stack.allocator.pop_deallocate();
+                (*stack.allocator.get()).pop_deallocate();
             }
         }
     }
 }
 
 pub struct Stack {
-    allocator: StackAllocator,
-    tasks: Vec<Task>,
+    allocator: UnsafeCell<StackAllocator>,
+    tasks: UnsafeCell<Vec<Task>>,
 }
 
 impl Stack {
     pub fn new() -> Self {
         Stack {
-            allocator: StackAllocator::new(),
-            tasks: Vec::new(),
+            allocator: UnsafeCell::new(StackAllocator::new()),
+            tasks: UnsafeCell::new(Vec::new()),
         }
     }
 
@@ -244,20 +243,20 @@ impl Stack {
             let ctx = Ctx::new_ptr(NonNull::from(&*self));
 
             let place = Box::new(UnsafeCell::new(None));
-            let place_ptr = NonNull::from(place.as_ref());
+            let place_ptr = NonNull::new_unchecked(Box::into_raw(place));
 
-            let future_ptr = self.allocator.alloc::<TaskFuture<Fut, R>>();
+            let future_ptr = (*self.allocator.get()).alloc::<TaskFuture<Fut, R>>();
 
             future_ptr.as_ptr().write(TaskFuture {
                 place: place_ptr,
                 inner: (f)(ctx),
             });
 
-            self.tasks.push(Task::wrap_future(future_ptr));
+            (*self.tasks.get()).push(Task::wrap_future(future_ptr));
 
             Runner {
-                place,
-                ptr: NonNull::from(self),
+                place: place_ptr,
+                ptr: NonNull::from(&*self),
                 _stack_marker: PhantomData,
                 _res_marker: PhantomData,
             }
