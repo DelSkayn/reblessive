@@ -107,7 +107,7 @@ impl StackAllocator {
 
                 let new_size = (size << 1).max(layout.size().next_power_of_two());
 
-                let mut block = self.alloc_new_block(dbg!(new_size));
+                let mut block = self.alloc_new_block(new_size);
 
                 let top = block.as_ref().top;
 
@@ -154,7 +154,7 @@ impl StackAllocator {
             {
                 // old block is empty, deallocate.
                 block.as_mut().previous = prev_block.as_ref().previous;
-                let layout = Layout::from_size_align(dbg!(prev_block.as_ref().size), 8).unwrap();
+                let layout = Layout::from_size_align(prev_block.as_ref().size, 8).unwrap();
                 std::alloc::dealloc(prev_block.as_ptr().cast(), layout);
                 return;
             }
@@ -193,8 +193,12 @@ mod test {
             let mut alloc = StackAllocator::new();
             let mut allocations = Vec::new();
 
-            for i in 0..1000 {
-                dbg!(i);
+            #[cfg(not(miri))]
+            let amount = 1000;
+            #[cfg(miri)]
+            let amount = 10;
+
+            for i in 0..amount {
                 let alloc = alloc.alloc::<usize>();
                 alloc.as_ptr().write(i);
                 assert!(!allocations.contains(&alloc));
@@ -205,14 +209,14 @@ mod test {
                 assert_eq!(i, v.as_ptr().read())
             }
 
-            for _ in 0..500 {
+            for _ in 0..(amount / 2) {
                 allocations.pop();
                 alloc.pop_deallocate();
             }
 
             let mut allocations_2 = Vec::new();
 
-            for i in 0..1000 {
+            for i in 0..amount {
                 let alloc = alloc.alloc::<u128>();
                 alloc.as_ptr().write(i as u128);
                 assert!(!allocations_2.contains(&alloc));
