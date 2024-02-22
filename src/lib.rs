@@ -14,9 +14,8 @@ use std::{
     task::{Context, Poll},
 };
 
-use allocator::StackAllocator;
 use pin_project_lite::pin_project;
-use task::Task;
+use task::Tasks;
 
 pin_project_lite::pin_project! {
     pub struct CtxFuture<'a, 's, F, R> {
@@ -30,7 +29,7 @@ pin_project_lite::pin_project! {
 impl<'a, 's, F, Fut, R> Future for CtxFuture<'a, 's, F, R>
 where
     F: FnOnce(Ctx<'s>) -> Fut,
-    Fut: Future<Output = R> + 's,
+    Fut: Future<Output = R>,
 {
     type Output = R;
 
@@ -41,14 +40,11 @@ where
             if let Some(x) = this.f.take() {
                 let ctx = Ctx::new_ptr(*this.ptr);
 
-                let future_ptr = (*this.ptr.as_ref().allocator.get()).alloc::<TaskFuture<Fut, R>>();
-
-                future_ptr.as_ptr().write(TaskFuture {
+                this.ptr.as_ref().0.push(TaskFuture {
                     place: NonNull::from(this.res),
                     inner: (x)(ctx),
                 });
 
-                (*this.ptr.as_ref().tasks.get()).push(Task::wrap_future(future_ptr));
                 return Poll::Pending;
             }
 
@@ -106,7 +102,7 @@ impl<'s> Ctx<'s> {
     pub fn run<'a, F, Fut, R>(&'a mut self, f: F) -> CtxFuture<'a, 's, F, R>
     where
         F: FnOnce(Ctx<'s>) -> Fut,
-        Fut: Future<Output = R> + 's,
+        Fut: Future<Output = R>,
     {
         CtxFuture {
             ptr: self.ptr,
@@ -130,30 +126,65 @@ impl<'a, R> Future for RunnerFuture<'a, R> {
         let this = self.project();
         unsafe {
             loop {
-                let tasks = &this.runner.ptr.as_ref().tasks;
-                let tasks_len = (*tasks.get()).len();
-                let Some(x) = (*tasks.get()).last_mut() else {
+                let tasks = &this.runner.ptr.as_ref().0;
+                let tasks_len = tasks.len();
+                let Some(mut task) = tasks.head() else {
                     panic!("Tasks empty")
                 };
 
-                match x.drive(cx) {
+                match task.drive(cx) {
                     Poll::Pending => {
-                        if (*tasks.get()).len() > tasks_len {
+                        if tasks.len() > tasks_len {
                             continue;
                         }
                         return Poll::Pending;
                     }
                     Poll::Ready(_) => {
-                        let task = (*tasks.get()).pop().unwrap();
-                        task.drop();
-                        (*this.runner.ptr.as_ref().allocator.get()).pop_deallocate();
-                        if (*tasks.get()).is_empty() {
+                        tasks.drop(task);
+                        if tasks_len == 1 {
                             let value = (*this.runner.place.as_ref().get()).take().unwrap();
                             return Poll::Ready(value);
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+pin_project! {
+    pub struct StepFuture<'a,'b,R>{
+        runner: &'a mut Runner<'b,R>
+    }
+}
+
+impl<'a, 'b, R> Future for StepFuture<'a, 'b, R> {
+    type Output = Option<R>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.project();
+        unsafe {
+            let tasks = &this.runner.ptr.as_ref().0;
+            let tasks_len = tasks.len();
+            let Some(mut task) = tasks.head() else {
+                panic!("Tasks empty")
+            };
+
+            match task.drive(cx) {
+                Poll::Pending => {
+                    if tasks.len() == tasks_len {
+                        return Poll::Pending;
+                    }
+                }
+                Poll::Ready(_) => {
+                    tasks.drop(task);
+                    if tasks_len == 1 {
+                        let value = (*this.runner.place.as_ref().get()).take().unwrap();
+                        return Poll::Ready(Some(value));
+                    }
+                }
+            }
+            Poll::Ready(None)
         }
     }
 }
@@ -177,30 +208,28 @@ impl<'a, R> Runner<'a, R> {
     pub fn step(&mut self) -> Option<R> {
         unsafe {
             {
-                let Some(mut x) = (*self.ptr.as_ref().tasks.get()).last().cloned() else {
-                    panic!("Tasks empty")
+                let Some(mut task) = self.ptr.as_ref().0.head() else {
+                    return Some((*self.place.as_ref().get()).take().unwrap());
                 };
+
                 let waker = stub_ctx::get();
                 let mut context = Context::from_waker(&waker);
 
-                match x.drive(&mut context) {
+                match task.drive(&mut context) {
                     Poll::Pending => return None,
-                    Poll::Ready(_) => {}
+                    Poll::Ready(_) => self.ptr.as_ref().0.drop(task),
                 }
-            }
-
-            let task = (*self.ptr.as_ref().tasks.get()).pop().unwrap();
-            task.drop();
-            (*self.ptr.as_ref().allocator.get()).pop_deallocate();
-            if (*self.ptr.as_ref().tasks.get()).is_empty() {
-                return Some((*self.place.as_ref().get()).take().unwrap());
             }
         }
         None
     }
 
+    pub fn step_async<'b>(&'b mut self) -> StepFuture<'b, 'a, R> {
+        StepFuture { runner: self }
+    }
+
     pub fn depth(&self) -> usize {
-        unsafe { (*self.ptr.as_ref().tasks.get()).len() }
+        unsafe { self.ptr.as_ref().0.len() }
     }
 
     pub fn finish_async(self) -> RunnerFuture<'a, R> {
@@ -211,29 +240,31 @@ impl<'a, R> Runner<'a, R> {
 impl<'a, R> Drop for Runner<'a, R> {
     fn drop(&mut self) {
         unsafe {
-            let _ = Box::from_raw(self.place.as_ptr());
             let stack = self.ptr.as_ref();
-            while let Some(t) = (*stack.tasks.get()).pop() {
-                t.drop();
-                (*stack.allocator.get()).pop_deallocate();
+            while let Some(t) = stack.0.head() {
+                stack.0.drop(t)
             }
         }
     }
 }
 
-pub struct Stack {
-    allocator: UnsafeCell<StackAllocator>,
-    tasks: UnsafeCell<Vec<Task>>,
-}
+pub struct Stack(Tasks);
 
 impl Stack {
+    /// Create a new empty stack to run reblessive futures in.
+    ///
+    /// This function does not allocate.
     pub fn new() -> Self {
-        Stack {
-            allocator: UnsafeCell::new(StackAllocator::new()),
-            tasks: UnsafeCell::new(Vec::new()),
-        }
+        Stack(Tasks::new())
     }
 
+    /// Create a new empty stack to run reblessive futures in with atleast cap bytes reserved for
+    /// future allocation.
+    pub fn with_capacity(cap: usize) -> Self {
+        Stack(Tasks::with_capacity(cap))
+    }
+
+    /// Run a future in the stack.
     pub fn run<'a, F, Fut, R>(&'a mut self, f: F) -> Runner<'a, R>
     where
         F: FnOnce(Ctx<'a>) -> Fut,
@@ -245,14 +276,10 @@ impl Stack {
             let place = Box::new(UnsafeCell::new(None));
             let place_ptr = NonNull::new_unchecked(Box::into_raw(place));
 
-            let future_ptr = (*self.allocator.get()).alloc::<TaskFuture<Fut, R>>();
-
-            future_ptr.as_ptr().write(TaskFuture {
+            self.0.push(TaskFuture {
                 place: place_ptr,
                 inner: (f)(ctx),
             });
-
-            (*self.tasks.get()).push(Task::wrap_future(future_ptr));
 
             Runner {
                 place: place_ptr,

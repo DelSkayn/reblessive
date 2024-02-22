@@ -1,35 +1,90 @@
 use std::{
+    cell::UnsafeCell,
     future::Future,
+    marker::PhantomData,
     pin::Pin,
-    ptr::NonNull,
+    ptr::{addr_of_mut, NonNull},
     task::{Context, Poll},
 };
 
+use crate::allocator::StackAllocator;
+
 #[derive(Debug, Clone)]
-pub struct Task {
-    ptr: NonNull<()>,
+pub struct TaskFunctions {
     dropper: unsafe fn(NonNull<()>),
     driver: unsafe fn(NonNull<()>, ctx: &mut Context<'_>) -> Poll<()>,
 }
 
-impl Task {
-    pub fn wrap_future<F>(ptr: NonNull<F>) -> Self
-    where
-        F: Future<Output = ()>,
-    {
-        Task {
-            ptr: ptr.cast(),
-            dropper: Self::drop_impl::<F>,
-            driver: Self::drive_impl::<F>,
+#[repr(C)]
+struct InnerStack<F> {
+    task: TaskFunctions,
+    future: F,
+}
+
+pub struct Task<'a> {
+    ptr: NonNull<InnerStack<()>>,
+    _marker: PhantomData<&'a InnerStack<()>>,
+}
+
+impl Task<'_> {
+    pub fn drive(&mut self, ctx: &mut Context<'_>) -> Poll<()> {
+        unsafe {
+            let future_ptr = NonNull::new_unchecked(addr_of_mut!((*self.ptr.as_ptr()).future));
+            (self.ptr.as_ref().task.driver)(future_ptr, ctx)
         }
     }
 
-    pub unsafe fn drive(&mut self, ctx: &mut Context<'_>) -> Poll<()> {
-        (self.driver)(self.ptr, ctx)
+    fn drop_in_place(&mut self) {
+        unsafe {
+            let future_ptr = NonNull::new_unchecked(addr_of_mut!((*self.ptr.as_ptr()).future));
+            (self.ptr.as_ref().task.dropper)(future_ptr)
+        }
+    }
+}
+
+pub struct Tasks(UnsafeCell<StackAllocator>);
+
+impl Tasks {
+    pub fn new() -> Self {
+        Tasks(UnsafeCell::new(StackAllocator::new()))
     }
 
-    pub unsafe fn drop(self) {
-        (self.dropper)(self.ptr)
+    pub fn with_capacity(cap: usize) -> Self {
+        Tasks(UnsafeCell::new(StackAllocator::with_capacity(cap)))
+    }
+
+    pub fn len(&self) -> usize {
+        unsafe { (*self.0.get()).allocations() }
+    }
+
+    pub fn push<F>(&self, f: F)
+    where
+        F: Future<Output = ()>,
+    {
+        unsafe {
+            let ptr = (*self.0.get()).alloc::<InnerStack<F>>();
+            ptr.as_ptr().write(InnerStack {
+                task: TaskFunctions {
+                    dropper: Self::drop_impl::<F>,
+                    driver: Self::drive_impl::<F>,
+                },
+                future: f,
+            })
+        }
+    }
+
+    pub fn head(&self) -> Option<Task> {
+        unsafe {
+            Some(Task {
+                ptr: (*self.0.get()).head()?.cast(),
+                _marker: PhantomData,
+            })
+        }
+    }
+
+    pub unsafe fn drop(&self, mut task: Task<'_>) {
+        task.drop_in_place();
+        (*self.0.get()).pop_deallocate()
     }
 
     unsafe fn drop_impl<F>(ptr: NonNull<()>)
