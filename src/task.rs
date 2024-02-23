@@ -3,42 +3,70 @@ use std::{
     future::Future,
     marker::PhantomData,
     pin::Pin,
-    ptr::{addr_of_mut, NonNull},
+    ptr::NonNull,
     task::{Context, Poll},
 };
 
 use crate::allocator::StackAllocator;
 
 #[derive(Debug, Clone)]
-pub struct TaskFunctions {
-    dropper: unsafe fn(NonNull<()>),
-    driver: unsafe fn(NonNull<()>, ctx: &mut Context<'_>) -> Poll<()>,
+#[repr(align(16))]
+pub struct TaskVTable {
+    dropper: unsafe fn(NonNull<AllocatedTask<u8>>),
+    driver: unsafe fn(NonNull<AllocatedTask<u8>>, ctx: &mut Context<'_>) -> Poll<()>,
+    //alloc_layout: Layout,
 }
 
 #[repr(C)]
-struct InnerStack<F> {
-    task: TaskFunctions,
+struct AllocatedTask<F> {
+    v_table: &'static TaskVTable,
     future: F,
 }
 
+impl TaskVTable {
+    pub fn get<F: Future<Output = ()>>() -> &'static TaskVTable {
+        trait HasVTable {
+            const V_TABLE: TaskVTable;
+        }
+
+        impl<F: Future<Output = ()>> HasVTable for F {
+            const V_TABLE: TaskVTable = TaskVTable {
+                dropper: TaskVTable::drop_impl::<F>,
+                driver: TaskVTable::drive_impl::<F>,
+                //alloc_layout: Layout::new::<AllocatedTask<Self>>(),
+            };
+        }
+
+        &<F as HasVTable>::V_TABLE
+    }
+
+    unsafe fn drop_impl<F>(ptr: NonNull<AllocatedTask<u8>>)
+    where
+        F: Future<Output = ()>,
+    {
+        std::ptr::drop_in_place(ptr.cast::<AllocatedTask<F>>().as_ptr())
+    }
+
+    unsafe fn drive_impl<F>(ptr: NonNull<AllocatedTask<u8>>, ctx: &mut Context<'_>) -> Poll<()>
+    where
+        F: Future<Output = ()>,
+    {
+        Pin::new_unchecked(&mut ptr.cast::<AllocatedTask<F>>().as_mut().future).poll(ctx)
+    }
+}
+
 pub struct Task<'a> {
-    ptr: NonNull<InnerStack<()>>,
-    _marker: PhantomData<&'a InnerStack<()>>,
+    ptr: NonNull<AllocatedTask<u8>>,
+    _marker: PhantomData<&'a AllocatedTask<u8>>,
 }
 
 impl Task<'_> {
     pub fn drive(&mut self, ctx: &mut Context<'_>) -> Poll<()> {
-        unsafe {
-            let future_ptr = NonNull::new_unchecked(addr_of_mut!((*self.ptr.as_ptr()).future));
-            (self.ptr.as_ref().task.driver)(future_ptr, ctx)
-        }
+        unsafe { (self.ptr.as_ref().v_table.driver)(self.ptr, ctx) }
     }
 
     fn drop_in_place(&mut self) {
-        unsafe {
-            let future_ptr = NonNull::new_unchecked(addr_of_mut!((*self.ptr.as_ptr()).future));
-            (self.ptr.as_ref().task.dropper)(future_ptr)
-        }
+        unsafe { (self.ptr.as_ref().v_table.dropper)(self.ptr) }
     }
 }
 
@@ -62,21 +90,18 @@ impl Tasks {
         F: Future<Output = ()>,
     {
         unsafe {
-            let ptr = (*self.0.get()).alloc::<InnerStack<F>>();
-            ptr.as_ptr().write(InnerStack {
-                task: TaskFunctions {
-                    dropper: Self::drop_impl::<F>,
-                    driver: Self::drive_impl::<F>,
-                },
-                future: f,
-            })
+            let ptr = (*self.0.get()).alloc::<AllocatedTask<F>>();
+            let v_table = TaskVTable::get::<F>();
+            ptr.as_ptr().write(AllocatedTask { v_table, future: f })
         }
     }
 
     pub fn head(&self) -> Option<Task> {
         unsafe {
+            let head = (*self.0.get()).head()?;
+
             Some(Task {
-                ptr: (*self.0.get()).head()?.cast(),
+                ptr: head.cast(),
                 _marker: PhantomData,
             })
         }
@@ -85,19 +110,5 @@ impl Tasks {
     pub unsafe fn drop(&self, mut task: Task<'_>) {
         task.drop_in_place();
         (*self.0.get()).pop_deallocate()
-    }
-
-    unsafe fn drop_impl<F>(ptr: NonNull<()>)
-    where
-        F: Future<Output = ()>,
-    {
-        std::ptr::drop_in_place(ptr.cast::<F>().as_ptr())
-    }
-
-    unsafe fn drive_impl<F>(ptr: NonNull<()>, ctx: &mut Context<'_>) -> Poll<()>
-    where
-        F: Future<Output = ()>,
-    {
-        Pin::new_unchecked(ptr.cast::<F>().as_mut()).poll(ctx)
     }
 }

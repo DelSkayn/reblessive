@@ -244,6 +244,7 @@ impl<'a, R> Drop for Runner<'a, R> {
             while let Some(t) = stack.0.head() {
                 stack.0.drop(t)
             }
+            let _ = Box::from_raw(self.place.as_ptr());
         }
     }
 }

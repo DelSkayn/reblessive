@@ -6,7 +6,7 @@ use crate::{Ctx, Stack};
 fn test_fibbo() {
     async fn heavy_fibbo(mut ctx: Ctx<'_>, n: usize) -> usize {
         // An extra stack allocation to simulate a more complex function.
-        let mut ballast: MaybeUninit<[u8; 1024 * 512]> = std::mem::MaybeUninit::uninit();
+        let mut ballast: MaybeUninit<[u8; 1024 * 128]> = std::mem::MaybeUninit::uninit();
         // Make sure the ballast isn't compiled out.
         std::hint::black_box(&mut ballast);
 
@@ -35,7 +35,7 @@ fn test_fibbo() {
 fn very_deep() {
     async fn deep(mut ctx: Ctx<'_>, n: usize) -> usize {
         // An extra stack allocation to simulate a more complex function.
-        let mut ballast: MaybeUninit<[u8; 1024 * 512]> = std::mem::MaybeUninit::uninit();
+        let mut ballast: MaybeUninit<[u8; 1024 * 128]> = std::mem::MaybeUninit::uninit();
         // Make sure the ballast isn't compiled out.
         std::hint::black_box(&mut ballast);
 
@@ -50,7 +50,7 @@ fn very_deep() {
     #[cfg(miri)]
     let depth = 10;
     #[cfg(not(miri))]
-    let depth = 100;
+    let depth = 1000;
 
     // run the function to completion on the stack.
     let res = stack.run(|ctx| deep(ctx, depth)).finish();

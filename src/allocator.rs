@@ -61,13 +61,23 @@ impl StackAllocator {
             if Self::block_empty(block) {
                 return None;
             }
-            Some(NonNull::new_unchecked(
-                block.cast::<u8>().as_ptr().sub(self.last_alloc_size),
-            ))
+            let top = block
+                .as_ref()
+                .top
+                .as_ptr()
+                .sub(self.last_alloc_size)
+                .cast::<Allocation<u8>>();
+            let top = addr_of_mut!((*top).value);
+            Some(NonNull::new_unchecked(top))
         } else {
-            Some(NonNull::new_unchecked(
-                block.cast::<u8>().as_ptr().sub(self.last_alloc_size),
-            ))
+            let top = block
+                .as_ref()
+                .top
+                .as_ptr()
+                .sub(self.last_alloc_size)
+                .cast::<Allocation<u8>>();
+            let top = addr_of_mut!((*top).value);
+            Some(NonNull::new_unchecked(top))
         }
     }
 
