@@ -2,6 +2,12 @@
 name = "reblessive"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.65"
+license = "MIT"
+readme = "README.md"
+description = "A small runtime for running deeply nested recursive functions"
+keywords = ["stack","call","async","memory","runtime"]
+repository = "https://github.com/DelSkayn/reblessive.git"
 
 [dependencies]
 pin-project-lite = "0.2.13"
