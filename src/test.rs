@@ -56,3 +56,44 @@ fn very_deep() {
     let res = stack.run(|ctx| deep(ctx, depth)).finish();
     assert_eq!(res, 0xCAFECAFE)
 }
+
+#[test]
+fn mutate_in_future() {
+    async fn mutate(mut ctx: Ctx<'_>, v: &mut Vec<usize>, depth: usize) {
+        v.push(depth);
+        if depth != 0 {
+            ctx.run(|ctx| mutate(ctx, v, depth - 1)).await
+        }
+    }
+
+    let mut stack = Stack::new();
+
+    let mut v = Vec::new();
+    stack.run(|ctx| mutate(ctx, &mut v, 1000)).finish();
+
+    for (idx, i) in (0..=1000).rev().enumerate() {
+        assert_eq!(v[idx], i)
+    }
+}
+
+#[test]
+fn mutate_created_in_future() {
+    async fn root(mut ctx: Ctx<'_>) {
+        let mut v = Vec::new();
+        ctx.run(|ctx| mutate(ctx, &mut v, 1000)).await;
+
+        for (idx, i) in (0..=1000).rev().enumerate() {
+            assert_eq!(v[idx], i)
+        }
+    }
+    async fn mutate(mut ctx: Ctx<'_>, v: &mut Vec<usize>, depth: usize) {
+        v.push(depth);
+        if depth != 0 {
+            ctx.run(|ctx| mutate(ctx, v, depth - 1)).await
+        }
+    }
+
+    let mut stack = Stack::new();
+
+    stack.run(root).finish();
+}
