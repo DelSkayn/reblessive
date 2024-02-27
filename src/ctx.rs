@@ -130,6 +130,19 @@ impl<'s> Ctx<'s> {
         }
     }
 
+    /// Wrap a function, allowing turning a `&mut Ctx` into a Ctx<'_>
+    ///
+    /// This function runs the returned future immediatly, it does not(!) have any guarentees about
+    /// not increasing stack usages.
+    pub async fn wrap<'a, F, Fut, R>(&'a mut self, f: F) -> R
+    where
+        F: FnOnce(Ctx<'s>) -> Fut,
+        Fut: Future<Output = R>,
+    {
+        let new_ctx = unsafe { Ctx::new_ptr(self.ptr) };
+        f(new_ctx).await
+    }
+
     /// Yield the execution of the recursive futures back to the reblessive runtime.
     ///
     /// When stepping through a function instead of finishing it awaiting the future returned by

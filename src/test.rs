@@ -3,7 +3,32 @@ use std::mem::MaybeUninit;
 use crate::{Ctx, Stack};
 
 #[test]
-fn test_fibbo() {
+fn call_not_wrapped() {
+    async fn a(ctx: &mut Ctx<'_>, depth: usize) {
+        b(ctx, depth).await
+    }
+
+    async fn b(ctx: &mut Ctx<'_>, depth: usize) {
+        if depth == 0 {
+            return;
+        }
+        ctx.run(|mut ctx| async move { a(&mut ctx, depth - 1).await })
+            .await
+    }
+
+    let mut stack = Stack::new();
+
+    #[cfg(miri)]
+    let depth = 10;
+    #[cfg(not(miri))]
+    let depth = 1000;
+    stack
+        .run(|mut ctx| async move { a(&mut ctx, depth).await })
+        .finish();
+}
+
+#[test]
+fn fibbo() {
     async fn heavy_fibbo(mut ctx: Ctx<'_>, n: usize) -> usize {
         // An extra stack allocation to simulate a more complex function.
         let mut ballast: MaybeUninit<[u8; 1024 * 128]> = std::mem::MaybeUninit::uninit();
