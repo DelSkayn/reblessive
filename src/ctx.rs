@@ -9,20 +9,24 @@ use std::{
 
 use pin_project_lite::pin_project;
 
-use crate::Stack;
+use crate::{Stack, State};
 
 pin_project_lite::pin_project! {
     pub struct CtxFuture<'a, 's, F, R> {
         ptr: NonNull<Stack>,
+        // The function to execute to get the future
         f: Option<F>,
+        // The place where the future will store the result.
         res: UnsafeCell<Option<R>>,
-        _marker: PhantomData<&'a mut Ctx<'s>>,
+        // The future holds onto the ctx mutably to prevent another future being pushed before the
+        // current is polled.
+        _marker: PhantomData<&'a mut Stk<'s>>,
     }
 }
 
 impl<'a, 's, F, Fut, R> Future for CtxFuture<'a, 's, F, R>
 where
-    F: FnOnce(Ctx<'s>) -> Fut,
+    F: FnOnce(Stk<'s>) -> Fut,
     Fut: Future<Output = R>,
 {
     type Output = R;
@@ -32,13 +36,14 @@ where
         let this = self.project();
         unsafe {
             if let Some(x) = this.f.take() {
-                let ctx = Ctx::new_ptr(*this.ptr);
+                let ctx = Stk::new_ptr(*this.ptr);
 
-                this.ptr.as_ref().0.push(TaskFuture {
+                this.ptr.as_ref().tasks.push(TaskFuture {
                     place: NonNull::from(this.res),
                     inner: (x)(ctx),
                 });
 
+                this.ptr.as_ref().state.set(State::NewTask);
                 return Poll::Pending;
             }
 
@@ -87,10 +92,8 @@ impl Future for YieldFuture {
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
         if let Some(ptr) = this.ptr.take() {
-            // TODO: The current executor figures out if it needs to continue running tasks by if a
-            // new task was scheduled. So we need to schedule an empty task to
             unsafe {
-                ptr.as_ref().0.push(async {});
+                ptr.as_ref().state.set(State::Yield);
             }
             return Poll::Pending;
         }
@@ -98,28 +101,28 @@ impl Future for YieldFuture {
     }
 }
 
-pub struct Ctx<'s> {
+pub struct Stk<'s> {
     ptr: NonNull<Stack>,
     _marker: PhantomData<&'s Stack>,
 }
 
-impl<'s> Ctx<'s> {
+impl<'s> Stk<'s> {
     pub(super) unsafe fn new_ptr(ptr: NonNull<Stack>) -> Self {
-        Ctx {
+        Stk {
             ptr,
             _marker: PhantomData,
         }
     }
 }
 
-unsafe impl<'s> Send for Ctx<'s> {}
-unsafe impl<'s> Sync for Ctx<'s> {}
+unsafe impl<'s> Send for Stk<'s> {}
+unsafe impl<'s> Sync for Stk<'s> {}
 
-impl<'s> Ctx<'s> {
+impl<'s> Stk<'s> {
     /// Run a new future in the runtime.
     pub fn run<'a, F, Fut, R>(&'a mut self, f: F) -> CtxFuture<'a, 's, F, R>
     where
-        F: FnOnce(Ctx<'s>) -> Fut,
+        F: FnOnce(Stk<'s>) -> Fut,
         Fut: Future<Output = R>,
     {
         CtxFuture {
@@ -136,10 +139,10 @@ impl<'s> Ctx<'s> {
     /// not increasing stack usages.
     pub async fn wrap<'a, F, Fut, R>(&'a mut self, f: F) -> R
     where
-        F: FnOnce(Ctx<'s>) -> Fut,
+        F: FnOnce(Stk<'s>) -> Fut,
         Fut: Future<Output = R>,
     {
-        let new_ctx = unsafe { Ctx::new_ptr(self.ptr) };
+        let new_ctx = unsafe { Stk::new_ptr(self.ptr) };
         f(new_ctx).await
     }
 

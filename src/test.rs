@@ -1,14 +1,14 @@
 use std::mem::MaybeUninit;
 
-use crate::{Ctx, Stack};
+use crate::{Stk, Stack};
 
 #[test]
 fn call_not_wrapped() {
-    async fn a(ctx: &mut Ctx<'_>, depth: usize) {
+    async fn a(ctx: &mut Stk<'_>, depth: usize) {
         b(ctx, depth).await
     }
 
-    async fn b(ctx: &mut Ctx<'_>, depth: usize) {
+    async fn b(ctx: &mut Stk<'_>, depth: usize) {
         if depth == 0 {
             return;
         }
@@ -29,7 +29,7 @@ fn call_not_wrapped() {
 
 #[test]
 fn fibbo() {
-    async fn heavy_fibbo(mut ctx: Ctx<'_>, n: usize) -> usize {
+    async fn heavy_fibbo(mut ctx: Stk<'_>, n: usize) -> usize {
         // An extra stack allocation to simulate a more complex function.
         let mut ballast: MaybeUninit<[u8; 1024 * 128]> = std::mem::MaybeUninit::uninit();
         // Make sure the ballast isn't compiled out.
@@ -58,7 +58,7 @@ fn fibbo() {
 
 #[test]
 fn very_deep() {
-    async fn deep(mut ctx: Ctx<'_>, n: usize) -> usize {
+    async fn deep(mut ctx: Stk<'_>, n: usize) -> usize {
         // An extra stack allocation to simulate a more complex function.
         let mut ballast: MaybeUninit<[u8; 1024 * 128]> = std::mem::MaybeUninit::uninit();
         // Make sure the ballast isn't compiled out.
@@ -84,7 +84,7 @@ fn very_deep() {
 
 #[test]
 fn mutate_in_future() {
-    async fn mutate(mut ctx: Ctx<'_>, v: &mut Vec<usize>, depth: usize) {
+    async fn mutate(mut ctx: Stk<'_>, v: &mut Vec<usize>, depth: usize) {
         v.push(depth);
         if depth != 0 {
             ctx.run(|ctx| mutate(ctx, v, depth - 1)).await
@@ -103,7 +103,7 @@ fn mutate_in_future() {
 
 #[test]
 fn mutate_created_in_future() {
-    async fn root(mut ctx: Ctx<'_>) {
+    async fn root(mut ctx: Stk<'_>) {
         let mut v = Vec::new();
         ctx.run(|ctx| mutate(ctx, &mut v, 1000)).await;
 
@@ -111,7 +111,7 @@ fn mutate_created_in_future() {
             assert_eq!(v[idx], i)
         }
     }
-    async fn mutate(mut ctx: Ctx<'_>, v: &mut Vec<usize>, depth: usize) {
+    async fn mutate(mut ctx: Stk<'_>, v: &mut Vec<usize>, depth: usize) {
         v.push(depth);
         if depth != 0 {
             ctx.run(|ctx| mutate(ctx, v, depth - 1)).await

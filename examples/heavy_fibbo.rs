@@ -3,9 +3,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use reblessive::{Ctx, Stack};
+use reblessive::{Stack, Stk};
 
-async fn heavy_fibbo(mut ctx: Ctx<'_>, n: usize) -> usize {
+async fn heavy_fibbo(mut ctx: Stk<'_>, n: usize) -> usize {
     // An extra stack allocation to simulate a more complex function.
     let mut ballast: MaybeUninit<[u8; 1024 * 1024]> = std::mem::MaybeUninit::uninit();
     // Make sure the ballast isn't compiled out.

@@ -1,6 +1,6 @@
-use std::{fmt, iter::Peekable, str::SplitWhitespace, string::ParseError};
+use std::{fmt, iter::Peekable, str::SplitWhitespace};
 
-use reblessive::Ctx;
+use reblessive::Stk;
 
 #[derive(Debug)]
 enum UnaryOperator {
@@ -48,7 +48,7 @@ impl fmt::Display for Error {
 }
 
 async fn parse(
-    mut ctx: Ctx<'_>,
+    mut ctx: Stk<'_>,
     tokens: &mut Peekable<SplitWhitespace<'_>>,
     binding_power: u8,
 ) -> Result<Expression, Error> {
@@ -117,7 +117,7 @@ async fn parse(
     Ok(lhs)
 }
 
-async fn eval(mut ctx: Ctx<'_>, expr: &Expression) -> f64 {
+async fn eval(mut ctx: Stk<'_>, expr: &Expression) -> f64 {
     match expr {
         Expression::Number(x) => *x,
         Expression::Covered(ref x) => ctx.run(|ctx| eval(ctx, x)).await,

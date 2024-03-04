@@ -2,7 +2,7 @@
 name = "reblessive"
 version = "0.1.2"
 edition = "2021"
-rust-version = "1.66"
+rust-version = "1.77"
 license = "MIT"
 readme = "README.md"
 description = "A small runtime for running deeply nested recursive functions"
