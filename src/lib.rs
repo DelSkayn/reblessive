@@ -115,6 +115,9 @@ pub struct Runner<'a, R> {
     _res_marker: PhantomData<R>,
 }
 
+unsafe impl<'a, R> Send for Runner<'a, R> {}
+unsafe impl<'a, R> Sync for Runner<'a, R> {}
+
 impl<'a, R> Runner<'a, R> {
     fn stack_state(&self) -> State {
         unsafe { self.ptr.as_ref().state.get() }

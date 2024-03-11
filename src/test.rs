@@ -1,6 +1,6 @@
 use std::mem::MaybeUninit;
 
-use crate::{Stk, Stack};
+use crate::{Stack, Stk};
 
 #[test]
 fn call_not_wrapped() {
@@ -121,4 +121,76 @@ fn mutate_created_in_future() {
     let mut stack = Stack::new();
 
     stack.run(root).finish();
+}
+
+#[test]
+fn borrow_lifetime_struct() {
+    struct Ref<'a> {
+        r: &'a usize,
+    }
+
+    async fn root(mut ctx: Stk<'_>) {
+        let depth = 100;
+        let r = Ref { r: &depth };
+        ctx.run(|ctx| go_deep(ctx, r)).await;
+    }
+
+    async fn go_deep(mut ctx: Stk<'_>, r: Ref<'_>) {
+        let depth = (*r.r) - 1;
+        if depth == 0 {
+            return;
+        }
+        let r = Ref { r: &depth };
+        ctx.run(|ctx| go_deep(ctx, r)).await
+    }
+
+    let mut stack = Stack::new();
+
+    stack.run(root).finish();
+}
+
+#[tokio::test]
+async fn read_cargo() {
+    async fn deep_read(mut ctx: Stk<'_>, n: usize) -> String {
+        // smaller ballast since tokio only allocates 2MB for its threads.
+        let mut ballast: MaybeUninit<[u8; 1024]> = std::mem::MaybeUninit::uninit();
+        std::hint::black_box(&mut ballast);
+
+        if n == 0 {
+            tokio::fs::read_to_string("./Cargo.toml").await.unwrap()
+        } else {
+            ctx.run(|ctx| deep_read(ctx, n - 1)).await
+        }
+    }
+
+    let mut stack = Stack::new();
+
+    let str = stack.run(|ctx| deep_read(ctx, 200)).finish_async().await;
+
+    assert_eq!(str, include_str!("../Cargo.toml"));
+}
+
+#[tokio::test]
+async fn read_cargo_spawn() {
+    async fn deep_read(mut ctx: Stk<'_>, n: usize) -> String {
+        // smaller ballast since tokio only allocates 2MB for its threads.
+        let mut ballast: MaybeUninit<[u8; 1024]> = std::mem::MaybeUninit::uninit();
+        std::hint::black_box(&mut ballast);
+
+        if n == 0 {
+            tokio::fs::read_to_string("./Cargo.toml").await.unwrap()
+        } else {
+            ctx.run(|ctx| deep_read(ctx, n - 1)).await
+        }
+    }
+
+    tokio::spawn(async {
+        let mut stack = Stack::new();
+
+        let str = stack.run(|ctx| deep_read(ctx, 200)).finish_async().await;
+
+        assert_eq!(str, include_str!("../Cargo.toml"));
+    })
+    .await
+    .unwrap();
 }

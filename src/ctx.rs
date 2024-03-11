@@ -146,6 +146,13 @@ impl<'s> Stk<'s> {
         f(new_ctx).await
     }
 
+    pub fn reborrow<'a>(&'a mut self) -> Stk<'a> {
+        Stk {
+            ptr: self.ptr,
+            _marker: PhantomData,
+        }
+    }
+
     /// Yield the execution of the recursive futures back to the reblessive runtime.
     ///
     /// When stepping through a function instead of finishing it awaiting the future returned by
