@@ -18,6 +18,7 @@ use std::{
 pub use ctx::Stk;
 use ctx::TaskFuture;
 use pin_project_lite::pin_project;
+use stub_ctx::WakerCtx;
 use task::Tasks;
 
 pin_project! {
@@ -32,14 +33,22 @@ impl<'a, R> Future for RunnerFuture<'a, R> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
         unsafe {
-            let tasks = &this.runner.ptr.as_ref().tasks;
+            let tasks = &this.runner.ptr.tasks;
+
+            let waker_ctx = WakerCtx {
+                stack: this.runner.ptr,
+                waker: Some(cx.waker()),
+            };
+            let waker = stub_ctx::create(&waker_ctx);
+            let mut cx = Context::from_waker(&waker);
+
             loop {
-                let Some(mut task) = tasks.head() else {
+                let Some(mut task) = tasks.last() else {
                     panic!("Tasks empty")
                 };
 
                 loop {
-                    match task.drive(cx) {
+                    match task.drive(&mut cx) {
                         Poll::Pending => match this.runner.stack_state() {
                             State::Empty => unreachable!(),
                             State::Running => return Poll::Pending,
@@ -52,7 +61,7 @@ impl<'a, R> Future for RunnerFuture<'a, R> {
                             }
                         },
                         Poll::Ready(_) => {
-                            tasks.drop(task);
+                            tasks.pop();
                             if tasks.len() == 0 {
                                 let value = (*this.runner.place.as_ref().get()).take().unwrap();
                                 return Poll::Ready(value);
@@ -79,11 +88,18 @@ impl<'a, 'b, R> Future for StepFuture<'a, 'b, R> {
         let this = self.project();
 
         unsafe {
-            let Some(mut task) = this.runner.ptr.as_ref().tasks.head() else {
+            let Some(mut task) = this.runner.ptr.tasks.last() else {
                 panic!("tasks already empty");
             };
 
-            match task.drive(cx) {
+            let waker_ctx = WakerCtx {
+                stack: this.runner.ptr,
+                waker: Some(cx.waker()),
+            };
+            let waker = stub_ctx::create(&waker_ctx);
+            let mut cx = Context::from_waker(&waker);
+
+            match task.drive(&mut cx) {
                 Poll::Pending => match this.runner.stack_state() {
                     State::Empty => unreachable!(),
                     State::Yield => {
@@ -95,8 +111,8 @@ impl<'a, 'b, R> Future for StepFuture<'a, 'b, R> {
                     }
                 },
                 Poll::Ready(_) => {
-                    this.runner.ptr.as_ref().tasks.drop(task);
-                    if this.runner.ptr.as_ref().tasks.len() == 0 {
+                    this.runner.ptr.tasks.pop();
+                    if this.runner.ptr.tasks.len() == 0 {
                         return Poll::Ready(Some(
                             (*this.runner.place.as_ref().get()).take().unwrap(),
                         ));
@@ -110,7 +126,7 @@ impl<'a, 'b, R> Future for StepFuture<'a, 'b, R> {
 
 pub struct Runner<'a, R> {
     place: NonNull<UnsafeCell<Option<R>>>,
-    ptr: NonNull<Stack>,
+    ptr: &'a Stack,
     _stack_marker: PhantomData<&'a mut Stack>,
     _res_marker: PhantomData<R>,
 }
@@ -120,11 +136,11 @@ unsafe impl<'a, R> Sync for Runner<'a, R> {}
 
 impl<'a, R> Runner<'a, R> {
     fn stack_state(&self) -> State {
-        unsafe { self.ptr.as_ref().state.get() }
+        self.ptr.state.get()
     }
 
     fn set_stack_state(&self, state: State) {
-        unsafe { self.ptr.as_ref().state.set(state) }
+        self.ptr.state.set(state)
     }
 
     pub fn finish(mut self) -> R {
@@ -132,8 +148,12 @@ impl<'a, R> Runner<'a, R> {
     }
 
     unsafe fn finish_inner(&mut self) -> R {
-        while let Some(mut task) = self.ptr.as_ref().tasks.head() {
-            let waker = stub_ctx::get();
+        while let Some(mut task) = self.ptr.tasks.last() {
+            let context = WakerCtx {
+                stack: self.ptr,
+                waker: None,
+            };
+            let waker = stub_ctx::create(&context);
             let mut context = Context::from_waker(&waker);
 
             loop {
@@ -150,7 +170,7 @@ impl<'a, R> Runner<'a, R> {
                         }
                     },
                     Poll::Ready(_) => {
-                        self.ptr.as_ref().tasks.drop(task);
+                        self.ptr.tasks.pop();
                         break;
                     }
                 }
@@ -161,11 +181,15 @@ impl<'a, R> Runner<'a, R> {
 
     pub fn step(&mut self) -> Option<R> {
         unsafe {
-            let Some(mut task) = self.ptr.as_ref().tasks.head() else {
+            let Some(mut task) = self.ptr.tasks.last() else {
                 panic!("tasks already empty");
             };
 
-            let waker = stub_ctx::get();
+            let context = WakerCtx {
+                stack: self.ptr,
+                waker: None,
+            };
+            let waker = stub_ctx::create(&context);
             let mut context = Context::from_waker(&waker);
 
             match task.drive(&mut context) {
@@ -180,8 +204,8 @@ impl<'a, R> Runner<'a, R> {
                     }
                 },
                 Poll::Ready(_) => {
-                    self.ptr.as_ref().tasks.drop(task);
-                    if self.ptr.as_ref().tasks.len() == 0 {
+                    self.ptr.tasks.pop();
+                    if self.ptr.tasks.len() == 0 {
                         return Some((*self.place.as_ref().get()).take().unwrap());
                     }
                 }
@@ -195,7 +219,7 @@ impl<'a, R> Runner<'a, R> {
     }
 
     pub fn depth(&self) -> usize {
-        unsafe { self.ptr.as_ref().tasks.len() }
+        self.ptr.tasks.len()
     }
 
     pub fn finish_async(self) -> RunnerFuture<'a, R> {
@@ -205,14 +229,8 @@ impl<'a, R> Runner<'a, R> {
 
 impl<'a, R> Drop for Runner<'a, R> {
     fn drop(&mut self) {
-        unsafe {
-            let stack = self.ptr.as_ref();
-            while let Some(t) = stack.tasks.head() {
-                stack.tasks.drop(t)
-            }
-            stack.state.set(State::Empty);
-            let _ = Box::from_raw(self.place.as_ptr());
-        }
+        self.ptr.tasks.clear();
+        unsafe { std::mem::drop(Box::from_raw(self.place.as_ptr())) };
     }
 }
 
@@ -263,12 +281,12 @@ impl Stack {
     /// Run a future in the stack.
     pub fn run<'a, F, Fut, R>(&'a mut self, f: F) -> Runner<'a, R>
     where
-        F: FnOnce(Stk<'a>) -> Fut,
+        F: FnOnce(&'a mut Stk) -> Fut,
         Fut: Future<Output = R> + 'a,
     {
         self.state.set(State::Running);
         unsafe {
-            let ctx = Stk::new_ptr(NonNull::from(&*self));
+            let ctx = Stk::new();
 
             let place = Box::new(UnsafeCell::new(None));
             let place_ptr = NonNull::new_unchecked(Box::into_raw(place));
@@ -280,7 +298,7 @@ impl Stack {
 
             Runner {
                 place: place_ptr,
-                ptr: NonNull::from(&*self),
+                ptr: self,
                 _stack_marker: PhantomData,
                 _res_marker: PhantomData,
             }

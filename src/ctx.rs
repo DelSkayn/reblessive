@@ -9,49 +9,70 @@ use std::{
 
 use pin_project_lite::pin_project;
 
-use crate::{Stack, State};
+use crate::{stub_ctx, Stack, State};
 
-pin_project_lite::pin_project! {
-    pub struct CtxFuture<'a, 's, F, R> {
-        ptr: NonNull<Stack>,
-        // The function to execute to get the future
-        f: Option<F>,
-        // The place where the future will store the result.
-        res: UnsafeCell<Option<R>>,
-        // The future holds onto the ctx mutably to prevent another future being pushed before the
-        // current is polled.
-        _marker: PhantomData<&'a mut Stk<'s>>,
-    }
+pub struct CtxFuture<'a, F, R> {
+    // A pointer to the stack, created once future task is pushed.
+    ptr: Option<NonNull<Stack>>,
+    // The function to execute to get the future
+    f: Option<F>,
+    // The place where the future will store the result.
+    res: UnsafeCell<Option<R>>,
+    // The future holds onto the ctx mutably to prevent another future being pushed before the
+    // current is polled.
+    _marker: PhantomData<&'a mut Stk>,
 }
 
-impl<'a, 's, F, Fut, R> Future for CtxFuture<'a, 's, F, R>
+impl<'a, F, Fut, R> Future for CtxFuture<'a, F, R>
 where
-    F: FnOnce(Stk<'s>) -> Fut,
-    Fut: Future<Output = R>,
+    F: FnOnce(&'a mut Stk) -> Fut,
+    Fut: Future<Output = R> + 'a,
 {
     type Output = R;
 
     #[inline]
-    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.project();
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // Pinning isn't structural for any of the fields.
+        let this = unsafe { self.get_unchecked_mut() };
         unsafe {
             if let Some(x) = this.f.take() {
-                let ctx = Stk::new_ptr(*this.ptr);
+                let stk = stub_ctx::get_stack(cx.waker());
+                let stk_ptr = NonNull::from(stk.as_ref().stack);
+                this.ptr = Some(stk_ptr);
 
-                this.ptr.as_ref().tasks.push(TaskFuture {
-                    place: NonNull::from(this.res),
+                let ctx = Stk::new();
+
+                stk_ptr.as_ref().tasks.push(TaskFuture {
+                    place: NonNull::from(&this.res),
                     inner: (x)(ctx),
                 });
 
-                this.ptr.as_ref().state.set(State::NewTask);
+                stk_ptr.as_ref().state.set(State::NewTask);
                 return Poll::Pending;
             }
 
             if let Some(x) = (*this.res.get()).take() {
+                // Set the this pointer to null to signal the drop impl that we don't need to pop
+                // the task.
+                this.ptr = None;
                 return Poll::Ready(x);
             }
         }
         Poll::Pending
+    }
+}
+
+impl<'a, F, R> Drop for CtxFuture<'a, F, R> {
+    fn drop(&mut self) {
+        if let Some(ptr) = self.ptr {
+            unsafe {
+                if (*self.res.get()).is_none() {
+                    // it ptr is some but self.res is none then the task was pushed but has not yet
+                    // completed and must be dropped first.
+                    ptr.as_ref().tasks.pop();
+                }
+            }
+        }
     }
 }
 
@@ -82,18 +103,21 @@ where
 
 pin_project! {
     pub struct YieldFuture{
-        ptr: Option<NonNull<Stack>>,
+        done: bool,
     }
 }
 
 impl Future for YieldFuture {
     type Output = ();
 
-    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
-        if let Some(ptr) = this.ptr.take() {
+        let stk = stub_ctx::get_stack(cx.waker());
+
+        if !*this.done {
+            *this.done = true;
             unsafe {
-                ptr.as_ref().state.set(State::Yield);
+                stk.as_ref().stack.state.set(State::Yield);
             }
             return Poll::Pending;
         }
@@ -101,54 +125,25 @@ impl Future for YieldFuture {
     }
 }
 
-pub struct Stk<'s> {
-    ptr: NonNull<Stack>,
-    _marker: PhantomData<&'s Stack>,
-}
+pub struct Stk(());
 
-impl<'s> Stk<'s> {
-    pub(super) unsafe fn new_ptr(ptr: NonNull<Stack>) -> Self {
-        Stk {
-            ptr,
-            _marker: PhantomData,
-        }
+impl Stk {
+    pub(super) unsafe fn new() -> &'static mut Self {
+        NonNull::dangling().as_mut()
     }
 }
 
-unsafe impl<'s> Send for Stk<'s> {}
-unsafe impl<'s> Sync for Stk<'s> {}
-
-impl<'s> Stk<'s> {
+impl Stk {
     /// Run a new future in the runtime.
-    pub fn run<'a, F, Fut, R>(&'a mut self, f: F) -> CtxFuture<'a, 's, F, R>
+    pub fn run<'a, F, Fut, R>(&'a mut self, f: F) -> CtxFuture<'a, F, R>
     where
-        F: FnOnce(Stk<'s>) -> Fut,
-        Fut: Future<Output = R>,
+        F: FnOnce(&'a mut Stk) -> Fut,
+        Fut: Future<Output = R> + 'a,
     {
         CtxFuture {
-            ptr: self.ptr,
+            ptr: None,
             f: Some(f),
             res: UnsafeCell::new(None),
-            _marker: PhantomData,
-        }
-    }
-
-    /// Wrap a function, allowing turning a `&mut Ctx` into a Ctx<'_>
-    ///
-    /// This function runs the returned future immediatly, it does not(!) have any guarentees about
-    /// not increasing stack usages.
-    pub async fn wrap<'a, F, Fut, R>(&'a mut self, f: F) -> R
-    where
-        F: FnOnce(Stk<'s>) -> Fut,
-        Fut: Future<Output = R>,
-    {
-        let new_ctx = unsafe { Stk::new_ptr(self.ptr) };
-        f(new_ctx).await
-    }
-
-    pub fn reborrow<'a>(&'a mut self) -> Stk<'a> {
-        Stk {
-            ptr: self.ptr,
             _marker: PhantomData,
         }
     }
@@ -158,8 +153,6 @@ impl<'s> Stk<'s> {
     /// When stepping through a function instead of finishing it awaiting the future returned by
     /// this function will cause the the current step to complete.
     pub fn yield_now(&mut self) -> YieldFuture {
-        YieldFuture {
-            ptr: Some(self.ptr),
-        }
+        YieldFuture { done: false }
     }
 }

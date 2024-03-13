@@ -48,7 +48,7 @@ impl fmt::Display for Error {
 }
 
 async fn parse(
-    mut ctx: Stk<'_>,
+    ctx: &mut Stk,
     tokens: &mut Peekable<SplitWhitespace<'_>>,
     binding_power: u8,
 ) -> Result<Expression, Error> {
@@ -117,7 +117,7 @@ async fn parse(
     Ok(lhs)
 }
 
-async fn eval(mut ctx: Stk<'_>, expr: &Expression) -> f64 {
+async fn eval(ctx: &mut Stk, expr: &Expression) -> f64 {
     match expr {
         Expression::Number(x) => *x,
         Expression::Covered(ref x) => ctx.run(|ctx| eval(ctx, x)).await,

@@ -1,5 +1,6 @@
 use std::{
-    cell::UnsafeCell,
+    alloc::Layout,
+    cell::{Cell, UnsafeCell},
     future::Future,
     marker::PhantomData,
     pin::Pin,
@@ -10,16 +11,16 @@ use std::{
 use crate::allocator::StackAllocator;
 
 #[derive(Debug, Clone)]
-#[repr(align(16))]
 pub struct TaskVTable {
     dropper: unsafe fn(NonNull<AllocatedTask<u8>>),
     driver: unsafe fn(NonNull<AllocatedTask<u8>>, ctx: &mut Context<'_>) -> Poll<()>,
-    //alloc_layout: Layout,
+    alloc_layout: Layout,
 }
 
 #[repr(C)]
 struct AllocatedTask<F> {
     v_table: &'static TaskVTable,
+    previous: Option<NonNull<AllocatedTask<u8>>>,
     future: F,
 }
 
@@ -33,7 +34,7 @@ impl TaskVTable {
             const V_TABLE: TaskVTable = TaskVTable {
                 dropper: TaskVTable::drop_impl::<F>,
                 driver: TaskVTable::drive_impl::<F>,
-                //alloc_layout: Layout::new::<AllocatedTask<Self>>(),
+                alloc_layout: Layout::new::<AllocatedTask<Self>>(),
             };
         }
 
@@ -61,28 +62,36 @@ pub struct Task<'a> {
 }
 
 impl Task<'_> {
-    pub fn drive(&mut self, ctx: &mut Context<'_>) -> Poll<()> {
-        unsafe { (self.ptr.as_ref().v_table.driver)(self.ptr, ctx) }
-    }
-
-    fn drop_in_place(&mut self) {
-        unsafe { (self.ptr.as_ref().v_table.dropper)(self.ptr) }
+    pub unsafe fn drive(&mut self, ctx: &mut Context<'_>) -> Poll<()> {
+        (self.ptr.as_ref().v_table.driver)(self.ptr, ctx)
     }
 }
 
-pub struct Tasks(UnsafeCell<StackAllocator>);
+pub struct Tasks {
+    last: Cell<Option<NonNull<AllocatedTask<u8>>>>,
+    allocator: UnsafeCell<StackAllocator>,
+    len: Cell<usize>,
+}
 
 impl Tasks {
     pub fn new() -> Self {
-        Tasks(UnsafeCell::new(StackAllocator::new()))
+        Tasks {
+            last: Cell::new(None),
+            allocator: UnsafeCell::new(StackAllocator::new()),
+            len: Cell::new(0),
+        }
     }
 
     pub fn with_capacity(cap: usize) -> Self {
-        Tasks(UnsafeCell::new(StackAllocator::with_capacity(cap)))
+        Tasks {
+            last: Cell::new(None),
+            allocator: UnsafeCell::new(StackAllocator::with_capacity(cap)),
+            len: Cell::new(0),
+        }
     }
 
     pub fn len(&self) -> usize {
-        unsafe { (*self.0.get()).allocations() }
+        self.len.get()
     }
 
     pub fn push<F>(&self, f: F)
@@ -90,25 +99,51 @@ impl Tasks {
         F: Future<Output = ()>,
     {
         unsafe {
-            let ptr = (*self.0.get()).alloc::<AllocatedTask<F>>();
+            let ptr = (*self.allocator.get())
+                .push_alloc(Layout::new::<AllocatedTask<F>>())
+                .cast::<AllocatedTask<F>>();
             let v_table = TaskVTable::get::<F>();
-            ptr.as_ptr().write(AllocatedTask { v_table, future: f })
+            ptr.as_ptr().write(AllocatedTask {
+                v_table,
+                previous: self.last.get(),
+                future: f,
+            });
+            self.last.set(Some(ptr.cast()));
+            self.len.set(self.len.get() + 1)
         }
     }
 
-    pub fn head(&self) -> Option<Task> {
-        unsafe {
-            let head = (*self.0.get()).head()?;
-
-            Some(Task {
-                ptr: head.cast(),
-                _marker: PhantomData,
-            })
-        }
+    pub fn last(&self) -> Option<Task> {
+        Some(Task {
+            ptr: self.last.get()?,
+            _marker: PhantomData,
+        })
     }
 
-    pub unsafe fn drop(&self, mut task: Task<'_>) {
-        task.drop_in_place();
-        (*self.0.get()).pop_deallocate()
+    unsafe fn drop_in_place(ptr: NonNull<AllocatedTask<u8>>) {
+        (ptr.as_ref().v_table.dropper)(ptr)
+    }
+
+    pub unsafe fn pop(&self) {
+        let len = self.len();
+        debug_assert_ne!(len, 0);
+        self.len.set(len - 1);
+        let last = self.last.get().unwrap();
+        self.last.set(last.as_ref().previous);
+        let layout = last.as_ref().v_table.alloc_layout;
+        Self::drop_in_place(last);
+        (*self.allocator.get()).pop_dealloc(layout);
+    }
+
+    pub fn clear(&self) {
+        for _ in 0..self.len() {
+            unsafe { self.pop() }
+        }
+    }
+}
+
+impl Drop for Tasks {
+    fn drop(&mut self) {
+        self.clear()
     }
 }
