@@ -19,6 +19,8 @@ impl StackAllocator {
         StackAllocator { block: None }
     }
 
+    /// Creates an allocator with reserve capacity for atleast cap bytes of space not taking into
+    /// account alignment.
     pub fn with_capacity(cap: usize) -> Self {
         let layout = Layout::new::<BlockHeader>();
         let block_size = layout.size() + cap.next_power_of_two();
@@ -28,19 +30,24 @@ impl StackAllocator {
         }
     }
 
+    /// Push a new allocation to the top of the allocator.
     pub fn push_alloc(&mut self, layout: Layout) -> NonNull<u8> {
         let block = if let Some(b) = self.block {
             b
         } else {
+            // No block, so first allocation, allocate a block which can contain the current to be
+            // allocated layout.
             let block = unsafe { Self::alloc_new_block_for_layout(layout) };
             self.block = Some(block);
             block
         };
 
+        // try to allocate within the current block.
         if let Some(res) = unsafe { Self::alloc_within_block(block, layout) } {
             return unsafe { NonNull::new_unchecked(Self::align_up(res.as_ptr(), layout)) };
         };
 
+        // we failed to allocate so we need to allocate a new block.
         let size = unsafe {
             block
                 .as_ref()
@@ -58,24 +65,35 @@ impl StackAllocator {
         unsafe { NonNull::new_unchecked(Self::align_up(res.as_ptr(), layout)) }
     }
 
+    /// Pop the top allocation from the allocator.
+    /// # Safety
+    /// Caller must ensure that the to be popped memory is no longer used and it was allocated with
+    /// the same layout as given to this function.
     pub unsafe fn pop_dealloc(&mut self, layout: Layout) {
         let size = Self::alloc_size(layout);
+        // try to deallocate from the current block.
         let mut block = self.block.expect("invalid deallocation");
         if block.as_ref().used > 0 {
             assert!(block.as_ref().used >= size, "invalid deallocation");
             block.as_mut().used -= size;
             return;
         }
+        // current block was empty so the allocation must be in the previous block.
         let mut old_block = block.as_ref().previous.expect("invalid deallocation");
         assert!(old_block.as_ref().used >= size, "invalid deallocation");
         old_block.as_mut().used -= size;
         if old_block.as_ref().used == 0 {
+            // previous block is now empty so deallocate the block.
+            // This also ensures that we always only have to look within the current or previous
+            // block when deallocating.
             block.as_mut().previous = old_block.as_ref().previous;
             Self::dealloc_old_block(old_block);
         }
     }
 
     // returns the amount of bytes required at most to allocate a value.
+    // If the layout has an alignment bigger than that of the block header we allocate a space
+    // larger then actually needed to ensure we can align the allocation pointer properly.
     fn alloc_size(layout: Layout) -> usize {
         let pad_size = layout
             .align()

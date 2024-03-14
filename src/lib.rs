@@ -241,7 +241,8 @@ enum State {
     /// normal execution of the stack.
     Running,
     /// A new task was pushed to the Stack
-    /// Stack should continue with the newly pushed future.
+    /// the current running future should yield back to the stack to continue executing the current
+    /// future.
     NewTask,
     /// Yielding was requested by a future.
     Yield,

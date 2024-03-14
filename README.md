@@ -13,11 +13,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use reblessive::{Ctx, Stack};
+use reblessive::{Stack, Stk};
 
-/// Some recursive algorith which can recurse up to some arbitrary depth.
-/// Without reblessive this function would quickly overflow the stack.
-async fn heavy_fibbo(mut ctx: Ctx<'_>, n: usize) -> usize {
+async fn heavy_fibbo(ctx: &mut Stk, n: usize) -> usize {
     // An extra stack allocation to simulate a more complex function.
     let mut ballast: MaybeUninit<[u8; 1024 * 1024]> = std::mem::MaybeUninit::uninit();
     // Make sure the ballast isn't compiled out.
@@ -27,7 +25,6 @@ async fn heavy_fibbo(mut ctx: Ctx<'_>, n: usize) -> usize {
         0 => 1,
         1 => 1,
         x => {
-            /// Move the next recursive calls onto the stack so we don't overflow.
             ctx.run(move |ctx| heavy_fibbo(ctx, x - 1)).await
                 + ctx.run(move |ctx| heavy_fibbo(ctx, x - 2)).await
         }
@@ -62,5 +59,4 @@ fn main() {
         }
     }
 }
-
 ```

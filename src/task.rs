@@ -10,10 +10,14 @@ use std::{
 
 use crate::allocator::StackAllocator;
 
+/// A constant table generated for each type of tasks that is spawned.
 #[derive(Debug, Clone)]
 pub struct TaskVTable {
+    /// Funtion to drop the task in place.
     dropper: unsafe fn(NonNull<AllocatedTask<u8>>),
+    /// Funtion to drive the task forward.
     driver: unsafe fn(NonNull<AllocatedTask<u8>>, ctx: &mut Context<'_>) -> Poll<()>,
+    /// The allocation layout.
     alloc_layout: Layout,
 }
 
