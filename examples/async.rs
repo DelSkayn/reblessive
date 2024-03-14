@@ -17,7 +17,7 @@ async fn deep_read(ctx: &mut Stk, n: usize) -> String {
 async fn main() {
     let mut stack = Stack::new();
 
-    let str = stack.run(|ctx| deep_read(ctx, 20)).finish_async().await;
+    let str = stack.enter(|ctx| deep_read(ctx, 20)).finish_async().await;
 
     println!("{}", str);
 }

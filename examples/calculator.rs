@@ -151,11 +151,11 @@ fn main() -> Result<(), Error> {
     }
     let mut stack = reblessive::Stack::new();
     let mut tokens = expr.split_whitespace().peekable();
-    let expr = stack.run(|ctx| parse(ctx, &mut tokens, 0)).finish()?;
+    let expr = stack.enter(|ctx| parse(ctx, &mut tokens, 0)).finish()?;
 
     eprintln!("EXPRESSION:\n{:#?}", expr);
 
-    println!("{}", stack.run(|ctx| eval(ctx, &expr)).finish());
+    println!("{}", stack.enter(|ctx| eval(ctx, &expr)).finish());
 
     Ok(())
 }

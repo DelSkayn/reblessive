@@ -21,7 +21,7 @@ fn call_not_wrapped() {
     let depth = 10;
     #[cfg(not(miri))]
     let depth = 1000;
-    stack.run(|ctx| a(ctx, depth)).finish();
+    stack.enter(|ctx| a(ctx, depth)).finish();
 }
 
 #[test]
@@ -49,7 +49,7 @@ fn fibbo() {
     let (v, depth) = (10946, 20);
 
     // run the function to completion on the stack.
-    let res = stack.run(|ctx| heavy_fibbo(ctx, depth)).finish();
+    let res = stack.enter(|ctx| heavy_fibbo(ctx, depth)).finish();
     assert_eq!(res, v);
 }
 
@@ -75,7 +75,7 @@ fn very_deep() {
     let depth = 1000;
 
     // run the function to completion on the stack.
-    let res = stack.run(|ctx| deep(ctx, depth)).finish();
+    let res = stack.enter(|ctx| deep(ctx, depth)).finish();
     assert_eq!(res, 0xCAFECAFE)
 }
 
@@ -91,7 +91,7 @@ fn mutate_in_future() {
     let mut stack = Stack::new();
 
     let mut v = Vec::new();
-    stack.run(|ctx| mutate(ctx, &mut v, 1000)).finish();
+    stack.enter(|ctx| mutate(ctx, &mut v, 1000)).finish();
 
     for (idx, i) in (0..=1000).rev().enumerate() {
         assert_eq!(v[idx], i)
@@ -117,7 +117,7 @@ fn mutate_created_in_future() {
 
     let mut stack = Stack::new();
 
-    stack.run(root).finish();
+    stack.enter(root).finish();
 }
 
 #[test]
@@ -143,7 +143,7 @@ fn borrow_lifetime_struct() {
 
     let mut stack = Stack::new();
 
-    stack.run(root).finish();
+    stack.enter(root).finish();
 }
 
 #[test]
@@ -199,7 +199,9 @@ fn test_bigger_alignment() {
     let depth = 10;
     #[cfg(not(miri))]
     let depth = 1000;
-    stack.run(|stk| count_u128(stk, &mut rand, depth)).finish();
+    stack
+        .enter(|stk| count_u128(stk, &mut rand, depth))
+        .finish();
 }
 
 // miri doesn't support epoll properly
@@ -220,7 +222,7 @@ async fn read_cargo() {
 
     let mut stack = Stack::new();
 
-    let str = stack.run(|ctx| deep_read(ctx, 200)).finish_async().await;
+    let str = stack.enter(|ctx| deep_read(ctx, 200)).finish_async().await;
 
     assert_eq!(str, include_str!("../Cargo.toml"));
 }
@@ -244,7 +246,7 @@ async fn read_cargo_spawn() {
     tokio::spawn(async {
         let mut stack = Stack::new();
 
-        let str = stack.run(|ctx| deep_read(ctx, 200)).finish_async().await;
+        let str = stack.enter(|ctx| deep_read(ctx, 200)).finish_async().await;
 
         assert_eq!(str, include_str!("../Cargo.toml"));
     })
