@@ -9,9 +9,13 @@ use std::{
 
 use pin_project_lite::pin_project;
 
-use crate::{stub_ctx, Stack, State};
+use super::State;
+use crate::{stub_ctx::WakerCtx, Stack};
 
-pub struct CtxFuture<'a, F, R> {
+/// Future returned by [`Stk::run`]
+///
+/// Should be immediatly polled when created and driven until finished.
+pub struct StkFuture<'a, F, R> {
     // A pointer to the stack, created once future task is pushed.
     ptr: Option<NonNull<Stack>>,
     // The function to execute to get the future
@@ -23,7 +27,7 @@ pub struct CtxFuture<'a, F, R> {
     _marker: PhantomData<&'a mut Stk>,
 }
 
-impl<'a, F, Fut, R> Future for CtxFuture<'a, F, R>
+impl<'a, F, Fut, R> Future for StkFuture<'a, F, R>
 where
     F: FnOnce(&'a mut Stk) -> Fut,
     Fut: Future<Output = R> + 'a,
@@ -36,7 +40,7 @@ where
         let this = unsafe { self.get_unchecked_mut() };
         unsafe {
             if let Some(x) = this.f.take() {
-                let stk = stub_ctx::get_stack(cx.waker());
+                let stk = WakerCtx::<Stack>::ptr_from_waker(cx.waker());
                 let stk_ptr = NonNull::from(stk.as_ref().stack);
                 this.ptr = Some(stk_ptr);
 
@@ -62,7 +66,7 @@ where
     }
 }
 
-impl<'a, F, R> Drop for CtxFuture<'a, F, R> {
+impl<'a, F, R> Drop for StkFuture<'a, F, R> {
     fn drop(&mut self) {
         if let Some(ptr) = self.ptr {
             unsafe {
@@ -102,6 +106,7 @@ where
 }
 
 pin_project! {
+    /// Future returned by [`Stk::yield_now`]
     pub struct YieldFuture{
         done: bool,
     }
@@ -112,7 +117,7 @@ impl Future for YieldFuture {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
-        let stk = stub_ctx::get_stack(cx.waker());
+        let stk = WakerCtx::<Stack>::ptr_from_waker(cx.waker());
 
         if !*this.done {
             *this.done = true;
@@ -125,6 +130,9 @@ impl Future for YieldFuture {
     }
 }
 
+/// A refernce back to stack from inside the running future.
+///
+/// Used for spawning new futures onto the stack from a future running on the stack.
 pub struct Stk(());
 
 impl Stk {
@@ -135,12 +143,12 @@ impl Stk {
 
 impl Stk {
     /// Run a new future in the runtime.
-    pub fn run<'a, F, Fut, R>(&'a mut self, f: F) -> CtxFuture<'a, F, R>
+    pub fn run<'a, F, Fut, R>(&'a mut self, f: F) -> StkFuture<'a, F, R>
     where
         F: FnOnce(&'a mut Stk) -> Fut,
         Fut: Future<Output = R> + 'a,
     {
-        CtxFuture {
+        StkFuture {
             ptr: None,
             f: Some(f),
             res: UnsafeCell::new(None),

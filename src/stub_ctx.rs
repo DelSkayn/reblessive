@@ -3,10 +3,9 @@ use std::{
     task::{RawWaker, RawWakerVTable, Waker},
 };
 
-use crate::Stack;
-
 unsafe fn stub_clone(ptr: *const ()) -> RawWaker {
-    let ptr = NonNull::new_unchecked(ptr as *mut WakerCtx);
+    // Casting to u8 is fine cause regardless of T the waker pointer will always be first.
+    let ptr = NonNull::new_unchecked(ptr as *mut WakerCtx<u8>);
     if let Some(x) = ptr.as_ref().waker {
         std::mem::transmute(x.clone())
     } else {
@@ -15,7 +14,8 @@ unsafe fn stub_clone(ptr: *const ()) -> RawWaker {
 }
 
 unsafe fn stub_wake(ptr: *const ()) {
-    let ptr = NonNull::new_unchecked(ptr as *mut WakerCtx);
+    // Casting to u8 is fine cause regardless of T the waker pointer will always be first.
+    let ptr = NonNull::new_unchecked(ptr as *mut WakerCtx<u8>);
     if let Some(x) = ptr.as_ref().waker {
         x.wake_by_ref()
     } else {
@@ -28,20 +28,23 @@ unsafe fn stub_drop(_: *const ()) {}
 static STUB_WAKER_V_TABLE: RawWakerVTable =
     RawWakerVTable::new(stub_clone, stub_wake, stub_wake, stub_drop);
 
-pub struct WakerCtx<'a> {
-    pub stack: &'a Stack,
+#[repr(C)]
+pub struct WakerCtx<'a, T> {
     pub waker: Option<&'a Waker>,
+    pub stack: &'a T,
 }
 
-pub fn create(ptr: &WakerCtx) -> Waker {
-    let raw = RawWaker::new(NonNull::from(ptr).as_ptr().cast(), &STUB_WAKER_V_TABLE);
-    unsafe { Waker::from_raw(raw) }
-}
+impl<'a, T> WakerCtx<'a, T> {
+    pub unsafe fn to_waker(&self) -> Waker {
+        let raw = RawWaker::new(NonNull::from(self).as_ptr().cast(), &STUB_WAKER_V_TABLE);
+        unsafe { Waker::from_raw(raw) }
+    }
 
-pub fn get_stack(waker: &Waker) -> NonNull<WakerCtx> {
-    let hack: &WakerHack = unsafe { std::mem::transmute(waker) };
-    assert_eq!(hack.vtable,&STUB_WAKER_V_TABLE,"Found waker not created by reblessive stack, reblessive futures only work inside the reblessive executor");
-    unsafe { NonNull::new_unchecked(hack.data as *mut WakerCtx) }
+    pub fn ptr_from_waker(waker: &Waker) -> NonNull<Self> {
+        let hack: &WakerHack = unsafe { std::mem::transmute(waker) };
+        assert_eq!(hack.vtable,&STUB_WAKER_V_TABLE,"Found waker not created by reblessive stack, reblessive futures only work inside the reblessive executor");
+        unsafe { NonNull::new_unchecked(hack.data as *mut Self) }
+    }
 }
 
 /// A struct with the same format as RawWaker.
