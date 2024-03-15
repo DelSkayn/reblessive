@@ -133,7 +133,7 @@ impl Future for YieldFuture {
 /// A refernce back to stack from inside the running future.
 ///
 /// Used for spawning new futures onto the stack from a future running on the stack.
-pub struct Stk(());
+pub struct Stk(PhantomData<*mut Stack>);
 
 impl Stk {
     pub(super) unsafe fn new() -> &'static mut Self {

@@ -8,6 +8,8 @@
 //! types of patterns break the stack allocation pattern which this executor uses to be able to
 //! allocate and run futures efficiently.
 
+use crate::{stub_ctx::WakerCtx, task::Tasks};
+use pin_project_lite::pin_project;
 use std::{
     cell::{Cell, UnsafeCell},
     future::Future,
@@ -17,13 +19,12 @@ use std::{
     task::{Context, Poll},
 };
 
-use crate::{stub_ctx::WakerCtx, task::Tasks};
-
 mod stk;
 use stk::TaskFuture;
 pub use stk::{Stk, StkFuture, YieldFuture};
 
-use pin_project_lite::pin_project;
+#[cfg(test)]
+mod test;
 
 pin_project! {
     /// Future returned by [`Runner::finish_async`]

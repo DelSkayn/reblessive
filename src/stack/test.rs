@@ -1,4 +1,10 @@
-use std::mem::MaybeUninit;
+use std::{
+    cell::Cell,
+    future::{Future, Ready},
+    mem::MaybeUninit,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 use crate::{Stack, Stk};
 
@@ -224,7 +230,7 @@ async fn read_cargo() {
 
     let str = stack.enter(|ctx| deep_read(ctx, 200)).finish_async().await;
 
-    assert_eq!(str, include_str!("../Cargo.toml"));
+    assert_eq!(str, include_str!("../../Cargo.toml"));
 }
 
 // miri doesn't support epoll properly
@@ -248,8 +254,121 @@ async fn read_cargo_spawn() {
 
         let str = stack.enter(|ctx| deep_read(ctx, 200)).finish_async().await;
 
-        assert_eq!(str, include_str!("../Cargo.toml"));
+        assert_eq!(str, include_str!("../../Cargo.toml"));
     })
     .await
     .unwrap();
+}
+
+pin_project_lite::pin_project! {
+    struct ManualPoll<F, Fn> {
+        #[pin]
+        future: F,
+        poll: Fn,
+    }
+}
+
+impl<F, R, Fn> ManualPoll<F, Fn>
+where
+    F: Future<Output = R>,
+    Fn: FnMut(Pin<&mut F>, &mut Context) -> Poll<()>,
+{
+    fn wrap(future: F, poll: Fn) -> Self {
+        ManualPoll { future, poll }
+    }
+}
+
+impl<F, R, Fn> Future for ManualPoll<F, Fn>
+where
+    F: Future<Output = R>,
+    Fn: FnMut(Pin<&mut F>, &mut Context) -> Poll<()>,
+{
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.project();
+        if (*this.poll)(this.future, cx).is_ready() {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+#[test]
+fn poll_once_then_drop() {
+    let mut stack = Stack::new();
+
+    async fn other(stk: &mut Stk) {
+        stk.yield_now().await;
+        stk.yield_now().await;
+        stk.yield_now().await;
+    }
+
+    async fn inner(stk: &mut Stk) {
+        let mut done = false;
+        ManualPoll::wrap(stk.run(other), |f, cx| {
+            if !done {
+                done = true;
+                let r = f.poll(cx);
+                assert_eq!(r, Poll::Pending);
+                r
+            } else {
+                Poll::Ready(())
+            }
+        })
+        .await
+    }
+
+    stack.enter(inner).finish()
+}
+
+#[test]
+fn poll_after_done() {
+    let mut stack = Stack::new();
+
+    async fn other(stk: &mut Stk) {
+        stk.yield_now().await;
+        stk.yield_now().await;
+        stk.yield_now().await;
+    }
+
+    async fn inner(stk: &mut Stk) {
+        ManualPoll::wrap(stk.run(other), |mut f, cx| match f.as_mut().poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(x) => {
+                let _ = f.as_mut().poll(cx);
+                let _ = f.as_mut().poll(cx);
+                let _ = f.as_mut().poll(cx);
+                let _ = f.as_mut().poll(cx);
+                Poll::Ready(x)
+            }
+        })
+        .await
+    }
+
+    stack.enter(inner).finish()
+}
+
+#[test]
+fn drop_future() {
+    thread_local! {
+        static COUNTER: Cell<usize> = const{ Cell::new(0)};
+    }
+
+    let mut stack = Stack::new();
+
+    async fn other(_stk: &mut Stk) {
+        COUNTER.with(|x| x.set(x.get() + 1))
+    }
+
+    async fn inner(stk: &mut Stk) {
+        std::mem::drop(stk.yield_now());
+        stk.run(other).await;
+        std::mem::drop(stk.run(other));
+        stk.run(other).await;
+    }
+
+    stack.enter(inner).finish();
+    assert_eq!(COUNTER.get(), 2)
 }
