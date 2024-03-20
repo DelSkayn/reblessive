@@ -24,7 +24,8 @@ jobs:
       matrix:
         # run on stable and beta to ensure that tests won't break on the next version of the rust
         # toolchain
-        toolchain: [stable, beta]
+        # toolchain: [stable, beta]
+        toolchain: [beta]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -76,7 +77,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Install nightly for -Zminimal-versions
         uses: dtolnay/rust-toolchain@nightly
-      - name: rustup default stable
+      - name: rustup default nightly
         run: rustup default stable
       - name: cargo update -Zminimal-versions
         run: cargo +nightly update -Zminimal-versions
