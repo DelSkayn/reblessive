@@ -1,12 +1,12 @@
 use std::{
     cell::Cell,
-    future::{Future, Ready},
+    future::Future,
     mem::MaybeUninit,
     pin::Pin,
-    task::{Context, Poll},
+    task::{Context, Poll}, time::Duration,
 };
 
-use crate::{Stack, Stk};
+use crate::{test::thread_sleep, Stack, Stk};
 
 #[test]
 fn call_not_wrapped() {
@@ -83,6 +83,36 @@ fn very_deep() {
     // run the function to completion on the stack.
     let res = stack.enter(|ctx| deep(ctx, depth)).finish();
     assert_eq!(res, 0xCAFECAFE)
+}
+
+
+#[test]
+fn deep_sleep() {
+    pollster::block_on(async{
+        async fn deep(ctx: &mut Stk, n: usize) -> usize {
+            // An extra stack allocation to simulate a more complex function.
+            let mut ballast: MaybeUninit<[u8; 1024 * 128]> = std::mem::MaybeUninit::uninit();
+            // Make sure the ballast isn't compiled out.
+            std::hint::black_box(&mut ballast);
+
+            if n == 0 {
+                thread_sleep(Duration::from_millis(500)).await;
+                return 0xCAFECAFE;
+            }
+
+            ctx.run(move |ctx| deep(ctx, n - 1)).await
+        }
+        let mut stack = Stack::new();
+
+        #[cfg(miri)]
+        let depth = 10;
+        #[cfg(not(miri))]
+        let depth = 1000;
+
+        // run the function to completion on the stack.
+        let res = stack.enter(|ctx| deep(ctx, depth)).finish_async().await;
+        assert_eq!(res, 0xCAFECAFE)
+    })
 }
 
 #[test]
@@ -211,8 +241,8 @@ fn test_bigger_alignment() {
 }
 
 // miri doesn't support epoll properly
-#[cfg(not(miri))]
 #[tokio::test]
+#[cfg_attr(miri,ignore)]
 async fn read_cargo() {
     async fn deep_read(ctx: &mut Stk, n: usize) -> String {
         // smaller ballast since tokio only allocates 2MB for its threads.
@@ -234,8 +264,8 @@ async fn read_cargo() {
 }
 
 // miri doesn't support epoll properly
-#[cfg(not(miri))]
 #[tokio::test]
+#[cfg_attr(miri,ignore)]
 async fn read_cargo_spawn() {
     async fn deep_read(ctx: &mut Stk, n: usize) -> String {
         // smaller ballast since tokio only allocates 2MB for its threads.
@@ -369,6 +399,33 @@ fn drop_future() {
         stk.run(other).await;
     }
 
+    stack.enter(inner).finish();
+    assert_eq!(COUNTER.get(), 2)
+}
+
+#[test]
+#[cfg_attr(miri,ignore)]
+#[should_panic]
+fn forget_runner_and_use_again() {
+    thread_local! {
+        static COUNTER: Cell<usize> = const{ Cell::new(0)};
+    }
+
+    let mut stack = Stack::new();
+
+    async fn other(_stk: &mut Stk) {
+        COUNTER.with(|x| x.set(x.get() + 1))
+    }
+
+    async fn inner(stk: &mut Stk) {
+        std::mem::drop(stk.yield_now());
+        stk.run(other).await;
+        std::mem::drop(stk.run(other));
+        stk.run(other).await;
+    }
+
+    let runner = stack.enter(inner);
+    std::mem::forget(runner);
     stack.enter(inner).finish();
     assert_eq!(COUNTER.get(), 2)
 }

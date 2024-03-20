@@ -15,6 +15,7 @@ use crate::{stub_ctx::WakerCtx, Stack};
 /// Future returned by [`Stk::run`]
 ///
 /// Should be immediatly polled when created and driven until finished.
+#[must_use]
 pub struct StkFuture<'a, F, R> {
     // A pointer to the stack, created once future task is pushed.
     ptr: Option<NonNull<Stack>>,
@@ -81,6 +82,7 @@ impl<'a, F, R> Drop for StkFuture<'a, F, R> {
 }
 
 pin_project! {
+    #[must_use]
     pub(super) struct TaskFuture<F, R> {
         pub place: NonNull<UnsafeCell<Option<R>>>,
         #[pin]
@@ -107,6 +109,7 @@ where
 
 pin_project! {
     /// Future returned by [`Stk::yield_now`]
+    #[must_use]
     pub struct YieldFuture{
         done: bool,
     }
