@@ -9,7 +9,7 @@ mod task;
 pub mod tree;
 #[cfg(feature = "tree")]
 #[doc(inline)]
-pub use tree::{TreeStack, Stk as TreeStk};
+pub use tree::{Stk as TreeStk, TreeStack};
 
 #[doc(inline)]
 pub use stack::{Stack, Stk};

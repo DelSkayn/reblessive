@@ -1,11 +1,10 @@
+use crate::task::BoxedTask;
+use futures_util::FutureExt;
 use std::{
     cell::RefCell,
-    task::{Context, Poll},
     future::Future,
+    task::{Context, Poll},
 };
-use futures_util::FutureExt;
-use crate::task::BoxedTask;
-
 
 pub struct Schedular {
     inner: RefCell<Vec<Option<BoxedTask>>>,
@@ -24,15 +23,16 @@ impl Schedular {
 
     /// # Safety
     /// This function erases any lifetime associated with the future.
-    /// Caller must ensure that either the future completes or is dropped before the lifetime 
-    pub unsafe fn push<F>(&self, f: F) 
-        where F: Future<Output = ()>,
+    /// Caller must ensure that either the future completes or is dropped before the lifetime
+    pub unsafe fn push<F>(&self, f: F)
+    where
+        F: Future<Output = ()>,
     {
-        let f = unsafe{ BoxedTask::new(f) };
+        let f = unsafe { BoxedTask::new(f) };
         self.inner.borrow_mut().push(Some(f));
     }
 
-    pub fn clear(&self){
+    pub fn clear(&self) {
         self.inner.borrow_mut().clear()
     }
 
@@ -57,9 +57,9 @@ impl Schedular {
 
         let mut borrow = self.inner.borrow_mut();
         borrow.retain(|x| x.is_some());
-        if borrow.is_empty(){
+        if borrow.is_empty() {
             Poll::Ready(())
-        }else{
+        } else {
             Poll::Pending
         }
     }

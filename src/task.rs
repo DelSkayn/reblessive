@@ -73,7 +73,7 @@ impl BoxedTask {
     /// Create a new boxed task.
     ///
     /// # Safety
-    /// This function erases any possible lifetime associated with future. 
+    /// This function erases any possible lifetime associated with future.
     /// Caller must ensure that the future handed to this function outlives the object returned by
     /// the function.
     pub unsafe fn new<F>(f: F) -> Self

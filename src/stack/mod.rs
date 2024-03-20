@@ -272,7 +272,7 @@ impl<'a, R> Drop for Runner<'a, R> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq,PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum State {
     /// normal execution of the stack.
     Base,
@@ -371,7 +371,7 @@ impl Stack {
         self.state.set(state)
     }
 
-    pub(crate) fn clear(&self){
+    pub(crate) fn clear(&self) {
         self.tasks.clear();
     }
 }

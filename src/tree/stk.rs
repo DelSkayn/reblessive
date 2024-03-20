@@ -115,11 +115,10 @@ pub struct ScopeStkFuture<'a, R> {
     _marker: PhantomData<&'a ScopeStk>,
 }
 
-impl<'a,R> Drop for ScopeStkFuture<'a,R>{
-    fn drop(&mut self){
-        unsafe{ std::mem::drop(Box::from_raw(self.place.as_ptr())) };
+impl<'a, R> Drop for ScopeStkFuture<'a, R> {
+    fn drop(&mut self) {
+        unsafe { std::mem::drop(Box::from_raw(self.place.as_ptr())) };
     }
-
 }
 
 impl<'a, R> ScopeStkFuture<'a, R> {
@@ -147,10 +146,10 @@ impl<'a, R> Future for ScopeStkFuture<'a, R> {
                 }
                 Poll::Ready(_) => match self.stack.get_state() {
                     State::Base => {
-                        if let Some(x) = unsafe{ (*self.place().as_ref().get()).take() }{
-                            return Poll::Ready(x)
+                        if let Some(x) = unsafe { (*self.place().as_ref().get()).take() } {
+                            return Poll::Ready(x);
                         }
-                        return Poll::Pending
+                        return Poll::Pending;
                     }
                     State::NewTask => self.stack.set_state(State::Base),
                     State::Yield => todo!(),
@@ -182,7 +181,7 @@ impl ScopeStk {
     {
         let stack = Stack::new();
         let place = Box::into_raw(Box::new(UnsafeCell::new(None)));
-        let place = unsafe{ NonNull::new_unchecked(place) };
+        let place = unsafe { NonNull::new_unchecked(place) };
         let future = unsafe { f(Stk::new()) };
 
         stack.tasks().push(async move {

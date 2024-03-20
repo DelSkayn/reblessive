@@ -133,7 +133,7 @@ impl<'a, R> Drop for Runner<'a, R> {
     fn drop(&mut self) {
         self.ptr.root.clear();
         self.ptr.fanout.clear();
-        unsafe{ std::mem::drop(Box::from_raw(self.place.as_ptr())) };
+        unsafe { std::mem::drop(Box::from_raw(self.place.as_ptr())) };
     }
 }
 

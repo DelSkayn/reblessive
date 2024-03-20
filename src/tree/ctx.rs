@@ -3,7 +3,6 @@ use std::{
     task::{RawWaker, RawWakerVTable, Waker},
 };
 
-
 use crate::Stack;
 
 use super::schedular::Schedular;

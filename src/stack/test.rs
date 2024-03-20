@@ -3,7 +3,8 @@ use std::{
     future::Future,
     mem::MaybeUninit,
     pin::Pin,
-    task::{Context, Poll}, time::Duration,
+    task::{Context, Poll},
+    time::Duration,
 };
 
 use crate::{test::thread_sleep, Stack, Stk};
@@ -85,10 +86,9 @@ fn very_deep() {
     assert_eq!(res, 0xCAFECAFE)
 }
 
-
 #[test]
 fn deep_sleep() {
-    pollster::block_on(async{
+    pollster::block_on(async {
         async fn deep(ctx: &mut Stk, n: usize) -> usize {
             // An extra stack allocation to simulate a more complex function.
             let mut ballast: MaybeUninit<[u8; 1024 * 128]> = std::mem::MaybeUninit::uninit();
@@ -242,7 +242,7 @@ fn test_bigger_alignment() {
 
 // miri doesn't support epoll properly
 #[tokio::test]
-#[cfg_attr(miri,ignore)]
+#[cfg_attr(miri, ignore)]
 async fn read_cargo() {
     async fn deep_read(ctx: &mut Stk, n: usize) -> String {
         // smaller ballast since tokio only allocates 2MB for its threads.
@@ -265,7 +265,7 @@ async fn read_cargo() {
 
 // miri doesn't support epoll properly
 #[tokio::test]
-#[cfg_attr(miri,ignore)]
+#[cfg_attr(miri, ignore)]
 async fn read_cargo_spawn() {
     async fn deep_read(ctx: &mut Stk, n: usize) -> String {
         // smaller ballast since tokio only allocates 2MB for its threads.
@@ -404,7 +404,7 @@ fn drop_future() {
 }
 
 #[test]
-#[cfg_attr(miri,ignore)]
+#[cfg_attr(miri, ignore)]
 #[should_panic]
 fn forget_runner_and_use_again() {
     thread_local! {

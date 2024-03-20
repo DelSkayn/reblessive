@@ -11,7 +11,7 @@ thread_local! {
 
 #[test]
 fn basic() {
-    pollster::block_on(async{
+    pollster::block_on(async {
         let mut stack = TreeStack::new();
 
         let before = Instant::now();
