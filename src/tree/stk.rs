@@ -1,3 +1,4 @@
+use futures_util::future::poll_fn;
 use pin_project_lite::pin_project;
 
 use super::{ctx::WakerCtx, TreeStack};
@@ -6,9 +7,10 @@ use std::{
     cell::UnsafeCell,
     future::Future,
     marker::PhantomData,
-    pin::Pin,
+    pin::{pin, Pin},
     ptr::NonNull,
-    task::{Context, Poll},
+    sync::Arc,
+    task::{ready, Context, Poll},
 };
 
 pin_project! {
@@ -21,14 +23,14 @@ pin_project! {
     }
 }
 
-pin_project! {
-    #[must_use]
-    pub struct ScopeFuture<'a, F, R> {
-        entry: Option<F>,
-        #[pin]
-        place: UnsafeCell<Option<R>>,
-        _marker: PhantomData<&'a Stk>,
-    }
+pub struct ScopeFuture<'a, F, R> {
+    entry: Option<F>,
+    place: Arc<UnsafeCell<Option<R>>>,
+    _marker: PhantomData<&'a Stk>,
+}
+
+impl<'a, F, R> ScopeFuture<'a, F, R> {
+    pin_utils::unsafe_unpinned!(entry: Option<F>);
 }
 
 impl<'a, F, Fut, R> Future for ScopeFuture<'a, F, R>
@@ -40,19 +42,32 @@ where
     type Output = R;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.project();
+        let this = unsafe { self.get_unchecked_mut() };
         if let Some(x) = this.entry.take() {
             let prev = WakerCtx::ptr_from_waker(cx.waker());
             let fut = unsafe { (x)(ScopeStk::new()) };
-            let place = NonNull::from(this.place.as_ref().get_ref());
+            let place = this.place.clone();
             unsafe {
+                let waker = cx.waker().clone();
                 prev.as_ref().fan.push(Box::pin(async move {
-                    (*place.as_ref().get()) = Some(fut.await);
+                    let mut waker = Some(waker);
+                    let mut pin_future = pin!(fut);
+                    poll_fn(|cx: &mut Context| {
+                        let res = ready!(pin_future.as_mut().poll(cx));
+                        place.get().write(Some(res));
+                        waker.take().unwrap().wake();
+                        Poll::Ready(())
+                    })
+                    .await
                 }));
             }
             Poll::Pending
         } else {
-            unsafe { Poll::Ready((*this.place.get()).take().unwrap()) }
+            if let Some(x) = unsafe { std::ptr::replace(this.place.get(), None) } {
+                Poll::Ready(x)
+            } else {
+                Poll::Pending
+            }
         }
     }
 }
@@ -102,7 +117,7 @@ impl Stk {
     {
         ScopeFuture {
             entry: Some(f),
-            place: UnsafeCell::new(None),
+            place: Arc::new(UnsafeCell::new(None)),
             _marker: PhantomData,
         }
     }
@@ -185,9 +200,13 @@ impl ScopeStk {
         let future = unsafe { f(Stk::new()) };
 
         stack.tasks().push(async move {
-            unsafe {
-                (*place.as_ref().get()) = Some(future.await);
-            }
+            let mut pin_future = pin!(future);
+            poll_fn(move |cx: &mut Context| -> Poll<()> {
+                let res = ready!(pin_future.as_mut().poll(cx));
+                unsafe { place.as_ref().get().write(Some(res)) };
+                Poll::Ready(())
+            })
+            .await
         });
 
         ScopeStkFuture {

@@ -7,6 +7,7 @@ mod task;
 
 #[cfg(feature = "tree")]
 pub mod tree;
+
 #[cfg(feature = "tree")]
 #[doc(inline)]
 pub use tree::{Stk as TreeStk, TreeStack};

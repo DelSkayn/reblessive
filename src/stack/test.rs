@@ -136,15 +136,24 @@ fn mutate_in_future() {
 
 #[test]
 fn mutate_created_in_future() {
+    #[cfg(not(miri))]
+    const DEPTH: usize = 1000;
+    #[cfg(miri)]
+    const DEPTH: usize = 10;
+
     async fn root(ctx: &mut Stk) {
         let mut v = Vec::new();
-        ctx.run(|ctx| mutate(ctx, &mut v, 1000)).await;
+        ctx.run(|ctx| mutate(ctx, &mut v, DEPTH)).await;
 
-        for (idx, i) in (0..=1000).rev().enumerate() {
+        for (idx, i) in (0..=DEPTH).rev().enumerate() {
             assert_eq!(v[idx], i)
         }
     }
     async fn mutate(ctx: &mut Stk, v: &mut Vec<usize>, depth: usize) {
+        // An extra stack allocation to simulate a more complex function.
+        let mut ballast: MaybeUninit<[u8; 1024 * 128]> = std::mem::MaybeUninit::uninit();
+        // Make sure the ballast isn't compiled out.
+        std::hint::black_box(&mut ballast);
         v.push(depth);
         if depth != 0 {
             ctx.run(|ctx| mutate(ctx, v, depth - 1)).await
@@ -401,6 +410,17 @@ fn drop_future() {
 
     stack.enter(inner).finish();
     assert_eq!(COUNTER.get(), 2)
+}
+
+#[test]
+fn direct_enter() {
+    let mut stack = Stack::new();
+    pollster::block_on(async {
+        stack
+            .enter(|stk| stk.run(|stk| stk.run(|_| thread_sleep(Duration::from_millis(50)))))
+            .finish_async()
+            .await;
+    })
 }
 
 #[test]
