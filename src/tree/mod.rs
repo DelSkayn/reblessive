@@ -11,8 +11,6 @@ use std::{
     task::{Context, Poll},
 };
 
-mod ctx;
-
 mod schedular;
 use schedular::Schedular;
 
