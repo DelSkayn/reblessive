@@ -5,6 +5,21 @@ A heap allocated runtime for deeply recursive algorithms.
 Turn your cursed recursive algorithm into a blessed heap allocated structure which won't 
 overflow the stack, regardless of depth.
 
+## What is this crate for?
+
+There are some types of algorithms which are easiest to write as a recursive algorithm. 
+Examples include a recursive decent parsers and tree-walking interpreters. 
+These algorithms often need to keep track of complex stack of state and are therefore easiest to write as a set of recursive function calling each other.
+This does however have a major downside: The stack can be rather limited.
+Especially when the input of a algorithm is externally controlled, implementing it as a recursive algorithm is asking for stack overflows. 
+
+This library is an attempt to solve that issue.
+It provides a small executor which is able to efficiently allocate new futures in a stack like order and then drive them in a single loop.
+With these executors you can write your recursive algorithm as a set of futures. 
+The executor will then, whenever a function needs to call another, pause the current future to execute the newly scheduled future.
+This allows one to implement your algorithm in a way that still looks recursive but won't run out of stack if recursing very deep.
+
+
 ## Example
 
 ```rust
