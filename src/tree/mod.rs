@@ -1,6 +1,9 @@
-use crate::{stack::State, Stack};
+use crate::{
+    stack::{enter_stack_context, State},
+    Stack,
+};
 use std::{
-    cell::UnsafeCell,
+    cell::{Cell, UnsafeCell},
     future::Future,
     marker::PhantomData,
     pin::Pin,
@@ -19,9 +22,7 @@ pub use stk::{ScopeFuture, Stk, StkFuture, YieldFuture};
 #[cfg(test)]
 mod test;
 
-type BoxFuture<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
-
-#[must_use]
+#[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct FinishFuture<'a, R> {
     runner: Runner<'a, R>,
 }
@@ -30,47 +31,43 @@ impl<'a, R> Future for FinishFuture<'a, R> {
     type Output = R;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let cx = ctx::WakerCtx {
-            waker: cx.waker(),
-            fan: &self.runner.ptr.fanout,
-            stack: &self.runner.ptr.root,
-        };
-        let waker = unsafe { cx.to_waker() };
-        let mut context = Context::from_waker(&waker);
-
-        loop {
-            // First we need finish all fanout futures.
-            while !self.runner.ptr.fanout.is_empty() {
-                if self.runner.ptr.fanout.poll(&mut context).is_pending() {
-                    return Poll::Pending;
-                }
-            }
-
-            // No futures left in fanout, run on the root stack.
-            match self.runner.ptr.root.drive_head(&mut context) {
-                Poll::Ready(_) => {
-                    if self.runner.ptr.root.tasks().is_empty() {
-                        unsafe {
-                            return Poll::Ready(
-                                (*self.runner.place.as_ref().get()).take().unwrap(),
-                            );
-                        }
-                    }
-                }
-                Poll::Pending => match self.runner.ptr.root.get_state() {
-                    State::Base => {
-                        if self.runner.ptr.fanout.is_empty() {
+        enter_stack_context(&self.runner.ptr.root, || {
+            enter_tree_context(&self.runner.ptr.fanout, || {
+                loop {
+                    // First we need finish all fanout futures.
+                    while !self.runner.ptr.fanout.is_empty() {
+                        if self.runner.ptr.fanout.poll(cx).is_pending() {
                             return Poll::Pending;
                         }
                     }
-                    State::NewTask | State::Yield => {}
-                },
-            }
-        }
+
+                    // No futures left in fanout, run on the root stack.
+                    match self.runner.ptr.root.drive_head(cx) {
+                        Poll::Ready(_) => {
+                            if self.runner.ptr.root.tasks().is_empty() {
+                                unsafe {
+                                    return Poll::Ready(
+                                        (*self.runner.place.as_ref().get()).take().unwrap(),
+                                    );
+                                }
+                            }
+                        }
+                        Poll::Pending => match self.runner.ptr.root.get_state() {
+                            State::Base => {
+                                if self.runner.ptr.fanout.is_empty() {
+                                    return Poll::Pending;
+                                }
+                            }
+                            State::NewTask | State::Yield => {}
+                        },
+                    }
+                }
+            })
+        })
     }
 }
 
-#[must_use]
+#[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct StepFuture<'a, 'b, R> {
     runner: &'a mut Runner<'b, R>,
 }
@@ -79,37 +76,33 @@ impl<'a, 'b, R> Future for StepFuture<'a, 'b, R> {
     type Output = Option<R>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let cx = ctx::WakerCtx {
-            waker: cx.waker(),
-            fan: &self.runner.ptr.fanout,
-            stack: &self.runner.ptr.root,
-        };
-        let waker = unsafe { cx.to_waker() };
-        let mut context = Context::from_waker(&waker);
-
-        if !self.runner.ptr.fanout.is_empty() {
-            if self.runner.ptr.fanout.poll(&mut context).is_pending() {
-                return Poll::Pending;
-            }
-        }
-
-        // No futures left in fanout, run on the root stack.
-        match self.runner.ptr.root.drive_head(&mut context) {
-            Poll::Ready(_) => {
-                if self.runner.ptr.root.tasks().is_empty() {
-                    unsafe {
-                        return Poll::Ready(Some(
-                            (*self.runner.place.as_ref().get()).take().unwrap(),
-                        ));
+        enter_stack_context(&self.runner.ptr.root, || {
+            enter_tree_context(&self.runner.ptr.fanout, || {
+                if !self.runner.ptr.fanout.is_empty() {
+                    if self.runner.ptr.fanout.poll(cx).is_pending() {
+                        return Poll::Pending;
                     }
                 }
-            }
-            Poll::Pending => match self.runner.ptr.root.get_state() {
-                State::Base => return Poll::Pending,
-                State::NewTask | State::Yield => {}
-            },
-        }
-        Poll::Ready(None)
+
+                // No futures left in fanout, run on the root stack.
+                match self.runner.ptr.root.drive_head(cx) {
+                    Poll::Ready(_) => {
+                        if self.runner.ptr.root.tasks().is_empty() {
+                            unsafe {
+                                return Poll::Ready(Some(
+                                    (*self.runner.place.as_ref().get()).take().unwrap(),
+                                ));
+                            }
+                        }
+                    }
+                    Poll::Pending => match self.runner.ptr.root.get_state() {
+                        State::Base => return Poll::Pending,
+                        State::NewTask | State::Yield => {}
+                    },
+                }
+                Poll::Ready(None)
+            })
+        })
     }
 }
 
@@ -135,6 +128,35 @@ impl<'a, R> Drop for Runner<'a, R> {
         self.ptr.fanout.clear();
         unsafe { std::mem::drop(Box::from_raw(self.place.as_ptr())) };
     }
+}
+
+thread_local! {
+    static TREE_PTR: Cell<Option<NonNull<Schedular>>> = const { Cell::new(None) };
+}
+
+pub fn enter_tree_context<F, R>(ctx: &Schedular, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let ptr = TREE_PTR.with(|x| x.replace(Some(NonNull::from(ctx))));
+    struct Dropper(Option<NonNull<Schedular>>);
+    impl Drop for Dropper {
+        fn drop(&mut self) {
+            TREE_PTR.with(|x| x.set(self.0))
+        }
+    }
+    let _dropper = Dropper(ptr);
+    f()
+}
+
+pub fn with_tree_context<F, R>(f: F) -> R
+where
+    F: FnOnce(&Schedular) -> R,
+{
+    let ptr = TREE_PTR
+        .with(|x| x.get())
+        .expect("Not within a tree stack context");
+    unsafe { f(ptr.as_ref()) }
 }
 
 pub struct TreeStack {

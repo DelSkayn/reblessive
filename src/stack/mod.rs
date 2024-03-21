@@ -8,7 +8,7 @@
 //! types of patterns break the stack allocation pattern which this executor uses to be able to
 //! allocate and run futures efficiently.
 
-use crate::{stub_ctx::WakerCtx, task::Tasks};
+use crate::{stub_ctx, task::Tasks};
 use pin_project_lite::pin_project;
 use std::{
     cell::{Cell, UnsafeCell},
@@ -20,7 +20,6 @@ use std::{
 };
 
 mod stk;
-use stk::TaskFuture;
 pub use stk::{Stk, StkFuture, YieldFuture};
 
 #[cfg(test)]
@@ -28,7 +27,7 @@ mod test;
 
 pin_project! {
     /// Future returned by [`Runner::finish_async`]
-    #[must_use]
+    #[must_use = "futures do nothing unless you `.await` or poll them"]
     pub struct FinishFuture<'a,R>{
         runner: Runner<'a,R>
     }
@@ -38,54 +37,49 @@ impl<'a, R> Future for FinishFuture<'a, R> {
     type Output = R;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.project();
-        unsafe {
-            let tasks = &this.runner.ptr.tasks;
-
-            let waker_ctx = WakerCtx {
-                stack: this.runner.ptr,
-                waker: Some(cx.waker()),
-            };
-            let waker = waker_ctx.to_waker();
-            let mut cx = Context::from_waker(&waker);
-
-            loop {
-                let Some(mut task) = tasks.last() else {
-                    panic!("Tasks empty")
-                };
+        enter_stack_context(self.runner.ptr, || {
+            let this = self.project();
+            unsafe {
+                let tasks = &this.runner.ptr.tasks;
 
                 loop {
-                    match task.drive(&mut cx) {
-                        Poll::Pending => match this.runner.stack_state() {
-                            State::Base => return Poll::Pending,
-                            State::NewTask => {
-                                // New task was pushed so we need to start driving that task.
-                                this.runner.set_stack_state(State::Base);
+                    let Some(mut task) = tasks.last() else {
+                        panic!("Tasks empty")
+                    };
+
+                    loop {
+                        match task.drive(cx) {
+                            Poll::Pending => match this.runner.stack_state() {
+                                State::Base => return Poll::Pending,
+                                State::NewTask => {
+                                    // New task was pushed so we need to start driving that task.
+                                    this.runner.set_stack_state(State::Base);
+                                    break;
+                                }
+                                State::Yield => {
+                                    // Yield was requested but no new task was pushed so continue.
+                                    this.runner.set_stack_state(State::Base);
+                                }
+                            },
+                            Poll::Ready(_) => {
+                                tasks.pop();
+                                if tasks.is_empty() {
+                                    let value = (*this.runner.place.as_ref().get()).take().unwrap();
+                                    return Poll::Ready(value);
+                                }
                                 break;
                             }
-                            State::Yield => {
-                                // Yield was requested but no new task was pushed so continue.
-                                this.runner.set_stack_state(State::Base);
-                            }
-                        },
-                        Poll::Ready(_) => {
-                            tasks.pop();
-                            if tasks.is_empty() {
-                                let value = (*this.runner.place.as_ref().get()).take().unwrap();
-                                return Poll::Ready(value);
-                            }
-                            break;
                         }
                     }
                 }
             }
-        }
+        })
     }
 }
 
 pin_project! {
     /// Future returned by [`Runner::step_async`]
-    #[must_use]
+    #[must_use = "futures do nothing unless you `.await` or poll them"]
     pub struct StepFuture<'a,'b,R>{
         runner: &'a mut Runner<'b,R>
     }
@@ -95,47 +89,41 @@ impl<'a, 'b, R> Future for StepFuture<'a, 'b, R> {
     type Output = Option<R>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.project();
-
-        unsafe {
-            let waker_ctx = WakerCtx {
-                stack: this.runner.ptr,
-                waker: Some(cx.waker()),
-            };
-            let waker = waker_ctx.to_waker();
-            let mut cx = Context::from_waker(&waker);
-
-            match this.runner.ptr.drive_head(&mut cx) {
-                Poll::Pending => {
-                    match this.runner.ptr.state.get() {
-                        State::Base => {
-                            // A poll::pending was returned but no new task was created.
-                            // Thus we are waiting on an external future, and need to return
-                            // Poll::pending.
-                            return Poll::Pending;
-                        }
-                        State::NewTask => {
-                            // Poll::Pending was returned and a new future was created, therefore
-                            // we need to continue evaluating tasks so return Poll::Ready
-                            Poll::Ready(None)
-                        }
-                        State::Yield => {
-                            // Poll::Pending was returned and with a request to interrupt execution
-                            // so return ready
-                            Poll::Ready(None)
+        enter_stack_context(self.runner.ptr, || {
+            let this = self.project();
+            unsafe {
+                match this.runner.ptr.drive_head(cx) {
+                    Poll::Pending => {
+                        match this.runner.ptr.state.get() {
+                            State::Base => {
+                                // A poll::pending was returned but no new task was created.
+                                // Thus we are waiting on an external future, and need to return
+                                // Poll::pending.
+                                return Poll::Pending;
+                            }
+                            State::NewTask => {
+                                // Poll::Pending was returned and a new future was created, therefore
+                                // we need to continue evaluating tasks so return Poll::Ready
+                                Poll::Ready(None)
+                            }
+                            State::Yield => {
+                                // Poll::Pending was returned and with a request to interrupt execution
+                                // so return ready
+                                Poll::Ready(None)
+                            }
                         }
                     }
-                }
-                Poll::Ready(_) => {
-                    if this.runner.ptr.tasks().is_empty() {
-                        return Poll::Ready(Some(
-                            (*this.runner.place.as_ref().get()).take().unwrap(),
-                        ));
+                    Poll::Ready(_) => {
+                        if this.runner.ptr.tasks().is_empty() {
+                            return Poll::Ready(Some(
+                                (*this.runner.place.as_ref().get()).take().unwrap(),
+                            ));
+                        }
+                        Poll::Ready(None)
                     }
-                    Poll::Ready(None)
                 }
             }
-        }
+        })
     }
 }
 
@@ -172,34 +160,32 @@ impl<'a, R> Runner<'a, R> {
     }
 
     unsafe fn finish_inner(&mut self) -> R {
-        let context = WakerCtx {
-            stack: self.ptr,
-            waker: None,
-        };
-        let waker = context.to_waker();
-        let mut context = Context::from_waker(&waker);
+        enter_stack_context(self.ptr, || {
+            let waker = stub_ctx::get();
+            let mut context = Context::from_waker(&waker);
 
-        while let Some(mut task) = self.ptr.tasks.last() {
-            loop {
-                match task.drive(&mut context) {
-                    Poll::Pending => match self.stack_state() {
-                        State::Yield => {
-                            self.set_stack_state(State::Base);
-                        }
-                        State::Base => {}
-                        State::NewTask => {
-                            self.set_stack_state(State::Base);
+            while let Some(mut task) = self.ptr.tasks.last() {
+                loop {
+                    match task.drive(&mut context) {
+                        Poll::Pending => match self.stack_state() {
+                            State::Yield => {
+                                self.set_stack_state(State::Base);
+                            }
+                            State::Base => {}
+                            State::NewTask => {
+                                self.set_stack_state(State::Base);
+                                break;
+                            }
+                        },
+                        Poll::Ready(_) => {
+                            self.ptr.tasks.pop();
                             break;
                         }
-                    },
-                    Poll::Ready(_) => {
-                        self.ptr.tasks.pop();
-                        break;
                     }
                 }
             }
-        }
-        (*self.place.as_ref().get()).take().unwrap()
+            (*self.place.as_ref().get()).take().unwrap()
+        })
     }
 
     /// Run the spawned future for a single step, returning none if a future either completed or
@@ -212,34 +198,27 @@ impl<'a, R> Runner<'a, R> {
     /// future except those generated with the various function provided by the stack. For the
     /// async version see [`Runner::step_async`]
     pub fn step(&mut self) -> Option<R> {
-        unsafe {
-            let Some(mut task) = self.ptr.tasks.last() else {
-                panic!("tasks already empty");
-            };
+        enter_stack_context(self.ptr, || {
+            unsafe {
+                let waker = stub_ctx::get();
+                let mut context = Context::from_waker(&waker);
 
-            let context = WakerCtx {
-                stack: self.ptr,
-                waker: None,
-            };
-            let waker = context.to_waker();
-            let mut context = Context::from_waker(&waker);
-
-            match task.drive(&mut context) {
-                Poll::Pending => match self.stack_state() {
-                    State::Base => {}
-                    State::Yield | State::NewTask => {
-                        self.set_stack_state(State::Base);
-                    }
-                },
-                Poll::Ready(_) => {
-                    self.ptr.tasks.pop();
-                    if self.ptr.tasks.len() == 0 {
-                        return Some((*self.place.as_ref().get()).take().unwrap());
+                match self.ptr.drive_head(&mut context) {
+                    Poll::Pending => match self.stack_state() {
+                        State::Base => {}
+                        State::Yield | State::NewTask => {
+                            self.set_stack_state(State::Base);
+                        }
+                    },
+                    Poll::Ready(_) => {
+                        if self.ptr.tasks.len() == 0 {
+                            return Some((*self.place.as_ref().get()).take().unwrap());
+                        }
                     }
                 }
             }
-        }
-        None
+            None
+        })
     }
 
     /// Run the spawned future for a single step, returning none if a future either completed or
@@ -282,6 +261,35 @@ pub(crate) enum State {
     NewTask,
     /// Yielding was requested by a future.
     Yield,
+}
+
+thread_local! {
+    static STACK_PTR: Cell<Option<NonNull<Stack>>> = const { Cell::new(None) };
+}
+
+pub(crate) fn enter_stack_context<F, R>(context: &Stack, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let ptr = STACK_PTR.with(|x| x.replace(Some(NonNull::from(context))));
+    struct Dropper(Option<NonNull<Stack>>);
+    impl Drop for Dropper {
+        fn drop(&mut self) {
+            STACK_PTR.with(|x| x.set(self.0))
+        }
+    }
+    let _dropper = Dropper(ptr);
+    f()
+}
+
+pub(crate) fn with_stack_context<F, R>(f: F) -> R
+where
+    F: FnOnce(&Stack) -> R,
+{
+    let ptr = STACK_PTR
+        .with(|x| x.get())
+        .expect("Not within a stack context");
+    unsafe { f(ptr.as_ref()) }
 }
 
 /// A small minimal runtime for executing futures flattened onto the heap preventing stack
@@ -330,11 +338,10 @@ impl Stack {
 
             let place = Box::new(UnsafeCell::new(None));
             let place_ptr = NonNull::new_unchecked(Box::into_raw(place));
+            let fut = (f)(ctx);
 
-            self.tasks.push(TaskFuture {
-                place: place_ptr,
-                inner: (f)(ctx),
-            });
+            self.tasks
+                .push(async move { place_ptr.as_ref().get().write(Some(fut.await)) });
 
             Runner {
                 place: place_ptr,

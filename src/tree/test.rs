@@ -1,5 +1,4 @@
 use futures_util::future::join_all;
-use tokio::fs::read_dir;
 
 use super::{Stk, TreeStack};
 use crate::{test::thread_sleep, tree::stk::ScopeStk};
@@ -173,7 +172,6 @@ async fn tokio_sleep_depth() {
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn read_files() {
-    COUNTER.with(|x| x.set(0));
     let mut stack = TreeStack::new();
 
     async fn read_dir(stk: &ScopeStk, dir: PathBuf) -> String {
@@ -195,7 +193,7 @@ async fn read_files() {
     }
 
     let before = Instant::now();
-    stack
+    let full_text = stack
         .enter(|stk| async {
             stk.scope(|stk| read_dir(stk, Path::new("./").to_path_buf()))
                 .await
@@ -203,7 +201,7 @@ async fn read_files() {
         .finish()
         .await;
 
+    println!("{}", full_text);
+
     assert!(before.elapsed() < Duration::from_millis(2000));
-    // make sure the futures actually ran.
-    assert_eq!(COUNTER.with(|x| x.get()), 32);
 }

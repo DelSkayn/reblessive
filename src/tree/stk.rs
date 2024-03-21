@@ -1,8 +1,10 @@
 use futures_util::future::poll_fn;
-use pin_project_lite::pin_project;
 
-use super::{ctx::WakerCtx, TreeStack};
-use crate::{stack::State, Stack};
+use super::{with_tree_context, TreeStack};
+use crate::{
+    stack::{enter_stack_context, with_stack_context, State},
+    Stack,
+};
 use std::{
     cell::UnsafeCell,
     future::Future,
@@ -13,13 +15,54 @@ use std::{
     task::{ready, Context, Poll},
 };
 
-pin_project! {
-    #[must_use]
-    pub struct StkFuture<'a, F, R> {
-        #[pin]
-        place: UnsafeCell<Option<R>>,
-        entry: Option<F>,
-            _marker: PhantomData<&'a Stk>,
+/// Future returned by [`Stk::run`]
+///
+/// Should be immediatly polled when created and driven until finished.
+#[must_use = "futures do nothing unless you `.await` or poll them"]
+pub struct StkFuture<'a, F, R> {
+    // The function to execute to get the future
+    f: Option<F>,
+    completed: bool,
+    // The place where the future will store the result.
+    res: UnsafeCell<Option<R>>,
+    // The future holds onto the ctx mutably to prevent another future being pushed before the
+    // current is polled.
+    _marker: PhantomData<&'a mut Stk>,
+}
+
+impl<'a, F, Fut, R> Future for StkFuture<'a, F, R>
+where
+    F: FnOnce(&'a mut Stk) -> Fut,
+    Fut: Future<Output = R> + 'a,
+{
+    type Output = R;
+
+    #[inline]
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // Pinning isn't structural for any of the fields.
+        let this = unsafe { self.get_unchecked_mut() };
+        unsafe {
+            if let Some(x) = this.f.take() {
+                with_stack_context(|stack| {
+                    let place = NonNull::from(&this.res);
+                    let fut = (x)(Stk::new());
+
+                    stack
+                        .tasks()
+                        .push(async move { place.as_ref().get().write(Some(fut.await)) });
+                    stack.set_state(State::NewTask);
+                });
+                return Poll::Pending;
+            }
+
+            if let Some(x) = (*this.res.get()).take() {
+                // Set the this pointer to null to signal the drop impl that we don't need to pop
+                // the task.
+                this.completed = true;
+                return Poll::Ready(x);
+            }
+        }
+        Poll::Pending
     }
 }
 
@@ -44,23 +87,17 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = unsafe { self.get_unchecked_mut() };
         if let Some(x) = this.entry.take() {
-            let prev = WakerCtx::ptr_from_waker(cx.waker());
-            let fut = unsafe { (x)(ScopeStk::new()) };
-            let place = this.place.clone();
-            unsafe {
+            with_tree_context(|fanout| {
+                let fut = unsafe { (x)(ScopeStk::new()) };
+                let place = this.place.clone();
                 let waker = cx.waker().clone();
-                prev.as_ref().fan.push(Box::pin(async move {
-                    let mut waker = Some(waker);
-                    let mut pin_future = pin!(fut);
-                    poll_fn(|cx: &mut Context| {
-                        let res = ready!(pin_future.as_mut().poll(cx));
-                        place.get().write(Some(res));
-                        waker.take().unwrap().wake();
-                        Poll::Ready(())
+                unsafe {
+                    fanout.push(async move {
+                        place.get().write(Some(fut.await));
+                        waker.wake();
                     })
-                    .await
-                }));
-            }
+                }
+            });
             Poll::Pending
         } else {
             if let Some(x) = unsafe { std::ptr::replace(this.place.get(), None) } {
@@ -72,7 +109,7 @@ where
     }
 }
 
-#[must_use]
+#[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct YieldFuture {
     done: bool,
 }
@@ -96,8 +133,9 @@ impl Stk {
         Fut: Future<Output = R> + 'a,
     {
         StkFuture {
-            place: UnsafeCell::new(None),
-            entry: Some(f),
+            f: Some(f),
+            completed: false,
+            res: UnsafeCell::new(None),
             _marker: PhantomData,
         }
     }
@@ -123,7 +161,7 @@ impl Stk {
     }
 }
 
-#[must_use]
+#[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct ScopeStkFuture<'a, R> {
     place: NonNull<UnsafeCell<Option<R>>>,
     stack: Stack,
@@ -145,32 +183,24 @@ impl<'a, R> Future for ScopeStkFuture<'a, R> {
     type Output = R;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let prev = WakerCtx::ptr_from_waker(cx.waker());
-        let context = WakerCtx {
-            waker: cx.waker(),
-            stack: &self.stack,
-            fan: unsafe { prev.as_ref().fan },
-        };
-        let waker = unsafe { context.to_waker() };
-        let mut cx = Context::from_waker(&waker);
-
-        loop {
-            match self.stack.drive_head(&mut cx) {
+        let this = unsafe { self.get_unchecked_mut() };
+        enter_stack_context(&this.stack, || loop {
+            match this.stack.drive_head(cx) {
                 Poll::Pending => {
                     return Poll::Pending;
                 }
-                Poll::Ready(_) => match self.stack.get_state() {
+                Poll::Ready(_) => match this.stack.get_state() {
                     State::Base => {
-                        if let Some(x) = unsafe { (*self.place().as_ref().get()).take() } {
+                        if let Some(x) = unsafe { (*this.place.as_ref().get()).take() } {
                             return Poll::Ready(x);
                         }
                         return Poll::Pending;
                     }
-                    State::NewTask => self.stack.set_state(State::Base),
+                    State::NewTask => this.stack.set_state(State::Base),
                     State::Yield => todo!(),
                 },
             }
-        }
+        })
     }
 }
 
@@ -216,22 +246,3 @@ impl ScopeStk {
         }
     }
 }
-
-/*
-struct WakeOnDrop(Option<Waker>);
-
-impl Drop for WakeOnDrop {
-    fn drop(&mut self) {
-        self.0.take().wake();
-    }
-}
-
-#[derive(Clone)]
-struct ArcWaker(Arc<WakeOnDrop>);
-
-impl ArcWaker{
-    pub fn new(waker: Waker){
-        Arc::new(WakeOnDrop(Some(waker)));
-    }
-}
-*/

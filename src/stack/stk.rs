@@ -1,3 +1,5 @@
+use crate::stack::{with_stack_context, Stack, State};
+use pin_project_lite::pin_project;
 use std::{
     cell::UnsafeCell,
     future::Future,
@@ -7,20 +9,14 @@ use std::{
     task::{Context, Poll},
 };
 
-use pin_project_lite::pin_project;
-
-use super::State;
-use crate::{stub_ctx::WakerCtx, Stack};
-
 /// Future returned by [`Stk::run`]
 ///
 /// Should be immediatly polled when created and driven until finished.
-#[must_use]
+#[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct StkFuture<'a, F, R> {
-    // A pointer to the stack, created once future task is pushed.
-    ptr: Option<NonNull<Stack>>,
     // The function to execute to get the future
     f: Option<F>,
+    completed: bool,
     // The place where the future will store the result.
     res: UnsafeCell<Option<R>>,
     // The future holds onto the ctx mutably to prevent another future being pushed before the
@@ -36,30 +32,27 @@ where
     type Output = R;
 
     #[inline]
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
         // Pinning isn't structural for any of the fields.
         let this = unsafe { self.get_unchecked_mut() };
         unsafe {
             if let Some(x) = this.f.take() {
-                let stk = WakerCtx::<Stack>::ptr_from_waker(cx.waker());
-                let stk_ptr = NonNull::from(stk.as_ref().stack);
-                this.ptr = Some(stk_ptr);
+                with_stack_context(|stack| {
+                    let place = NonNull::from(&this.res);
+                    let fut = (x)(Stk::new());
 
-                let ctx = Stk::new();
-
-                stk_ptr.as_ref().tasks.push(TaskFuture {
-                    place: NonNull::from(&this.res),
-                    inner: (x)(ctx),
+                    stack
+                        .tasks
+                        .push(async move { place.as_ref().get().write(Some(fut.await)) });
+                    stack.state.set(State::NewTask);
                 });
-
-                stk_ptr.as_ref().state.set(State::NewTask);
                 return Poll::Pending;
             }
 
             if let Some(x) = (*this.res.get()).take() {
                 // Set the this pointer to null to signal the drop impl that we don't need to pop
                 // the task.
-                this.ptr = None;
+                this.completed = true;
                 return Poll::Ready(x);
             }
         }
@@ -69,47 +62,18 @@ where
 
 impl<'a, F, R> Drop for StkFuture<'a, F, R> {
     fn drop(&mut self) {
-        if let Some(ptr) = self.ptr {
-            unsafe {
-                if (*self.res.get()).is_none() {
-                    // it ptr is some but self.res is none then the task was pushed but has not yet
-                    // completed and must be dropped first.
-                    ptr.as_ref().tasks.pop();
-                }
-            }
+        if self.f.is_none() && !self.completed && self.res.get_mut().is_none() {
+            // F is none so we did push a task but we didn't yet return the value and it also isn't
+            // in its place. Therefore the task is still on the stack and needs to be popped.
+            with_stack_context(|stack| {
+                unsafe { stack.tasks().pop() };
+            })
         }
     }
 }
-
-pin_project! {
-    #[must_use]
-    pub(super) struct TaskFuture<F, R> {
-        pub place: NonNull<UnsafeCell<Option<R>>>,
-        #[pin]
-        pub inner: F,
-    }
-}
-
-impl<F, R> Future for TaskFuture<F, R>
-where
-    F: Future<Output = R>,
-{
-    type Output = ();
-
-    #[inline]
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.project();
-        unsafe {
-            let res = std::task::ready!(this.inner.poll(cx));
-            this.place.as_ref().get().write(Some(res));
-            Poll::Ready(())
-        }
-    }
-}
-
 pin_project! {
     /// Future returned by [`Stk::yield_now`]
-    #[must_use]
+    #[must_use = "futures do nothing unless you `.await` or poll them"]
     pub struct YieldFuture{
         done: bool,
     }
@@ -118,18 +82,16 @@ pin_project! {
 impl Future for YieldFuture {
     type Output = ();
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
-        let stk = WakerCtx::<Stack>::ptr_from_waker(cx.waker());
-
-        if !*this.done {
-            *this.done = true;
-            unsafe {
-                stk.as_ref().stack.state.set(State::Yield);
+        with_stack_context(|stack| {
+            if !*this.done {
+                *this.done = true;
+                stack.state.set(State::Yield);
+                return Poll::Pending;
             }
-            return Poll::Pending;
-        }
-        Poll::Ready(())
+            Poll::Ready(())
+        })
     }
 }
 
@@ -152,7 +114,7 @@ impl Stk {
         Fut: Future<Output = R> + 'a,
     {
         StkFuture {
-            ptr: None,
+            completed: false,
             f: Some(f),
             res: UnsafeCell::new(None),
             _marker: PhantomData,
