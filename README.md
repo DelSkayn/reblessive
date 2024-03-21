@@ -51,13 +51,13 @@ fn main() {
     let mut stack = Stack::new();
 
     // run the function to completion on the stack.
-    let res = stack.run(|ctx| heavy_fibbo(ctx, 20)).finish();
+    let res = stack.enter(|ctx| heavy_fibbo(ctx, 20)).finish();
     println!("result: {res}");
 
     assert_eq!(res, 10946);
 
     // Reblessive can also make any recursive function interuptable.
-    let mut runner = stack.run(|ctx| heavy_fibbo(ctx, 60));
+    let mut runner = stack.enter(|ctx| heavy_fibbo(ctx, 60));
 
     let start = Instant::now();
     loop {
