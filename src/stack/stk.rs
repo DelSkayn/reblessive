@@ -44,7 +44,7 @@ where
                     stack
                         .tasks
                         .push(async move { place.as_ref().get().write(Some(fut.await)) });
-                    stack.state.set(State::NewTask);
+                    stack.set_state(State::NewTask);
                 });
                 return Poll::Pending;
             }
@@ -88,7 +88,7 @@ impl Future for YieldFuture {
         with_stack_context(|stack| {
             if !*this.done {
                 *this.done = true;
-                stack.state.set(State::Yield);
+                stack.set_state(State::Yield);
                 return Poll::Pending;
             }
             Poll::Ready(())

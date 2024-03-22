@@ -94,7 +94,7 @@ impl<'a, 'b, R> Future for StepFuture<'a, 'b, R> {
             unsafe {
                 match this.runner.ptr.drive_head(cx) {
                     Poll::Pending => {
-                        match this.runner.ptr.state.get() {
+                        match this.runner.ptr.get_state() {
                             State::Base => {
                                 // A poll::pending was returned but no new task was created.
                                 // Thus we are waiting on an external future, and need to return
@@ -140,11 +140,11 @@ unsafe impl<'a, R> Sync for Runner<'a, R> {}
 
 impl<'a, R> Runner<'a, R> {
     fn stack_state(&self) -> State {
-        self.ptr.state.get()
+        self.ptr.get_state()
     }
 
     fn set_stack_state(&self, state: State) {
-        self.ptr.state.set(state)
+        self.ptr.set_state(state)
     }
 
     /// Drive the stack until it completes.
