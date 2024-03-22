@@ -1,3 +1,6 @@
+[![codecov](https://codecov.io/gh/DelSkayn/reblessive/graph/badge.svg?token=A2DZXD34AZ)](https://codecov.io/gh/DelSkayn/reblessive)
+
+
 # Reblessive
 
 A heap allocated runtime for deeply recursive algorithms.
