@@ -71,11 +71,12 @@ impl<'a, F, R> Drop for StkFuture<'a, F, R> {
         }
     }
 }
+
 pin_project! {
     /// Future returned by [`Stk::yield_now`]
     #[must_use = "futures do nothing unless you `.await` or poll them"]
     pub struct YieldFuture{
-        done: bool,
+        pub(crate) done: bool,
     }
 }
 

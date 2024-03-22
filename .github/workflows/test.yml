@@ -77,7 +77,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Install nightly for -Zminimal-versions
         uses: dtolnay/rust-toolchain@nightly
-      - name: rustup default nightly
+      - name: rustup default stable 
         run: rustup default stable
       - name: cargo update -Zminimal-versions
         run: cargo +nightly update -Zminimal-versions

@@ -2,7 +2,7 @@ use futures_util::future::poll_fn;
 
 use super::{with_tree_context, TreeStack};
 use crate::{
-    stack::{enter_stack_context, with_stack_context, State},
+    stack::{enter_stack_context, with_stack_context, State, YieldFuture},
     Stack,
 };
 use std::{
@@ -66,6 +66,18 @@ where
     }
 }
 
+impl<'a, F, R> Drop for StkFuture<'a, F, R> {
+    fn drop(&mut self) {
+        if self.f.is_none() && !self.completed && self.res.get_mut().is_none() {
+            // F is none so we did push a task but we didn't yet return the value and it also isn't
+            // in its place. Therefore the task is still on the stack and needs to be popped.
+            with_stack_context(|stack| {
+                unsafe { stack.tasks().pop() };
+            })
+        }
+    }
+}
+
 pub struct ScopeFuture<'a, F, R> {
     entry: Option<F>,
     place: Arc<UnsafeCell<Option<R>>>,
@@ -107,11 +119,6 @@ where
             }
         }
     }
-}
-
-#[must_use = "futures do nothing unless you `.await` or poll them"]
-pub struct YieldFuture {
-    done: bool,
 }
 
 /// A refernce back to stack from inside the running future.

@@ -1,3 +1,4 @@
+pub use crate::stack::YieldFuture;
 use crate::{
     stack::{enter_stack_context, State},
     Stack,
@@ -15,7 +16,7 @@ mod schedular;
 use schedular::Schedular;
 
 mod stk;
-pub use stk::{ScopeFuture, Stk, StkFuture, YieldFuture};
+pub use stk::{ScopeFuture, Stk, StkFuture};
 
 #[cfg(test)]
 mod test;
