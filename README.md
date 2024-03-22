@@ -1,4 +1,5 @@
 [![codecov](https://codecov.io/gh/DelSkayn/reblessive/graph/badge.svg?token=A2DZXD34AZ)](https://codecov.io/gh/DelSkayn/reblessive)
+![crates.io](https://img.shields.io/crates/v/reblessive.svg)
 
 
 # Reblessive
