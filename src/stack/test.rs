@@ -61,6 +61,100 @@ fn fibbo() {
 }
 
 #[test]
+fn fibbo_stepping() {
+    async fn fibbo(ctx: &mut Stk, n: usize) -> usize {
+        match n {
+            0 => 1,
+            1 => 1,
+            x => {
+                ctx.run(move |ctx| fibbo(ctx, x - 1)).await
+                    + ctx.run(move |ctx| fibbo(ctx, x - 2)).await
+            }
+        }
+    }
+    let mut stack = Stack::new();
+
+    #[cfg(miri)]
+    let (v, depth) = (13, 6);
+    #[cfg(not(miri))]
+    let (v, depth) = (10946, 20);
+
+    // run the function to completion on the stack.
+    let mut runner = stack.enter(|ctx| fibbo(ctx, depth));
+    loop {
+        if let Some(x) = runner.step() {
+            assert_eq!(x, v);
+            break;
+        }
+    }
+}
+
+#[test]
+fn fibbo_stepping_yield() {
+    async fn fibbo(ctx: &mut Stk, n: usize) -> usize {
+        match n {
+            0 => 1,
+            1 => 1,
+            x => {
+                let a = ctx.run(move |ctx| fibbo(ctx, x - 1)).await;
+                ctx.yield_now().await;
+                a + ctx.run(move |ctx| fibbo(ctx, x - 2)).await
+            }
+        }
+    }
+    let mut stack = Stack::new();
+
+    #[cfg(miri)]
+    let (v, depth) = (13, 6);
+    #[cfg(not(miri))]
+    let (v, depth) = (10946, 20);
+
+    // run the function to completion on the stack.
+    let mut runner = stack.enter(|ctx| fibbo(ctx, depth));
+    loop {
+        if let Some(x) = runner.step() {
+            assert_eq!(x, v);
+            break;
+        }
+    }
+}
+
+#[test]
+fn fibbo_finish_yield() {
+    async fn fibbo(ctx: &mut Stk, n: usize) -> usize {
+        match n {
+            0 => 1,
+            1 => 1,
+            x => {
+                let a = ctx.run(move |ctx| fibbo(ctx, x - 1)).await;
+                ctx.yield_now().await;
+                a + ctx.run(move |ctx| fibbo(ctx, x - 2)).await
+            }
+        }
+    }
+    let mut stack = Stack::new();
+
+    #[cfg(miri)]
+    let (v, depth) = (13, 6);
+    #[cfg(not(miri))]
+    let (v, depth) = (10946, 20);
+
+    // run the function to completion on the stack.
+    let res = stack.enter(|ctx| fibbo(ctx, depth)).finish();
+    assert_eq!(res, v)
+}
+
+#[test]
+#[should_panic]
+fn not_async() {
+    let mut stack = Stack::new();
+
+    stack
+        .enter(|_| async { tokio::time::sleep(Duration::from_secs(1)).await })
+        .finish();
+}
+
+#[test]
 fn very_deep() {
     async fn deep(ctx: &mut Stk, n: usize) -> usize {
         // An extra stack allocation to simulate a more complex function.
