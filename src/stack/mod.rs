@@ -60,7 +60,9 @@ impl<'a, R> Future for FinishFuture<'a, R> {
                                     // Yield was requested but no new task was pushed so continue.
                                     this.runner.set_stack_state(State::Base);
                                 }
-                                State::Cancelled => return Poll::Pending,
+                                State::Cancelled => {
+                                    unreachable!("Stack being dropped while actively driven")
+                                }
                             },
                             Poll::Ready(_) => {
                                 tasks.pop();
@@ -102,7 +104,9 @@ impl<'a, 'b, R> Future for StepFuture<'a, 'b, R> {
                                 // Poll::pending.
                                 return Poll::Pending;
                             }
-                            State::Cancelled => return Poll::Pending,
+                            State::Cancelled => {
+                                unreachable!("Stack being dropped while actively driven")
+                            }
                             State::NewTask => {
                                 // Poll::Pending was returned and a new future was created, therefore
                                 // we need to continue evaluating tasks so return Poll::Ready
@@ -178,7 +182,9 @@ impl<'a, R> Runner<'a, R> {
                                 self.set_stack_state(State::Base);
                                 break;
                             }
-                            State::Cancelled => unreachable!("Stack dropped while being finished"),
+                            State::Cancelled => {
+                                unreachable!("Stack being dropped while actively driven.")
+                            }
                         },
                         Poll::Ready(_) => {
                             self.ptr.tasks.pop();
