@@ -2,8 +2,8 @@ use std::{alloc::Layout, ptr::NonNull, usize};
 
 struct BlockHeader {
     previous: Option<NonNull<BlockHeader>>,
-    used: usize,
-    size: usize,
+    head: *mut u8,
+    last: *mut u8,
 }
 
 /// A stack allocator, an allocator which is only able to free the most recent allocated value.
@@ -32,37 +32,36 @@ impl StackAllocator {
 
     /// Push a new allocation to the top of the allocator.
     pub fn push_alloc(&mut self, layout: Layout) -> NonNull<u8> {
-        let block = if let Some(b) = self.block {
+        let mut block = if let Some(b) = self.block {
             b
         } else {
-            // No block, so first allocation, allocate a block which can contain the current to be
-            // allocated layout.
-            let block = unsafe { Self::alloc_new_block_for_layout(layout) };
-            self.block = Some(block);
-            block
+            unsafe { self.grow_initial(layout) }
         };
 
-        // try to allocate within the current block.
-        if let Some(res) = unsafe { Self::alloc_within_block(block, layout) } {
-            return unsafe { NonNull::new_unchecked(Self::align_up(res.as_ptr(), layout)) };
-        };
+        let size_required = Self::alloc_size(layout).unwrap();
+        if unsafe {
+            block.as_ref().head.offset_from(block.as_ptr().cast::<u8>()) as usize
+                - std::mem::size_of::<BlockHeader>()
+                < size_required
+        } {
+            // not enough space in existing block, allocate new block
+            block = unsafe { self.grow_alloc(layout) };
+        }
 
-        // we failed to allocate so we need to allocate a new block.
-        let size = unsafe {
-            block
-                .as_ref()
-                .size
-                .checked_add(Self::alloc_size(layout))
-                .unwrap()
-                .next_power_of_two()
-        };
-        assert_ne!(size, 0);
+        let mut res = unsafe { block.as_ref().head.sub(layout.size()) };
+        #[cfg(not(miri))]
+        {
+            res = ((res as usize) & !(layout.align() - 1)) as *mut u8;
+        }
+        #[cfg(miri)]
+        unsafe {
+            let offset = res as usize & layout.align() - 1;
+            res = res.sub(offset);
+        }
 
-        let mut new_block = unsafe { Self::alloc_new_block(size) };
-        unsafe { new_block.as_mut().previous = Some(block) };
-        self.block = Some(new_block);
-        let res = unsafe { Self::alloc_within_block(new_block, layout).unwrap() };
-        unsafe { NonNull::new_unchecked(Self::align_up(res.as_ptr(), layout)) }
+        unsafe { block.as_mut().head = block.as_ref().head.sub(size_required) };
+
+        unsafe { NonNull::new_unchecked(res) }
     }
 
     /// Pop the top allocation from the allocator.
@@ -70,62 +69,90 @@ impl StackAllocator {
     /// Caller must ensure that the to be popped memory is no longer used and it was allocated with
     /// the same layout as given to this function.
     pub unsafe fn pop_dealloc(&mut self, layout: Layout) {
-        let size = Self::alloc_size(layout);
+        let size = Self::alloc_size(layout).unwrap();
         // try to deallocate from the current block.
         let mut block = self.block.expect("invalid deallocation");
-        if block.as_ref().used > 0 {
-            assert!(block.as_ref().used >= size, "invalid deallocation");
-            block.as_mut().used -= size;
+        let head = block.as_ref().head;
+        if head != block.as_ref().last {
+            block.as_mut().head = head.add(size);
             return;
         }
-        // current block was empty so the allocation must be in the previous block.
+
         let mut old_block = block.as_ref().previous.expect("invalid deallocation");
-        assert!(old_block.as_ref().used >= size, "invalid deallocation");
-        old_block.as_mut().used -= size;
-        if old_block.as_ref().used == 0 {
-            // previous block is now empty so deallocate the block.
-            // This also ensures that we always only have to look within the current or previous
-            // block when deallocating.
+        let head = old_block.as_ref().head;
+        assert_ne!(head, old_block.as_ref().last, "invalid deallocation");
+        let head_add = head.add(size);
+
+        if head_add == old_block.as_ref().last {
             block.as_mut().previous = old_block.as_ref().previous;
             Self::dealloc_old_block(old_block);
+        } else {
+            old_block.as_mut().head = head_add;
         }
     }
 
     // returns the amount of bytes required at most to allocate a value.
     // If the layout has an alignment bigger than that of the block header we allocate a space
     // larger then actually needed to ensure we can align the allocation pointer properly.
-    fn alloc_size(layout: Layout) -> usize {
+    const fn alloc_size(layout: Layout) -> Option<usize> {
         let pad_size = layout
             .align()
             .saturating_sub(std::mem::align_of::<BlockHeader>());
-        layout.size().checked_add(pad_size).unwrap()
+        layout.size().checked_add(pad_size)
     }
 
     #[cold]
-    unsafe fn alloc_new_block_for_layout(layout: Layout) -> NonNull<BlockHeader> {
-        let size = Self::alloc_size(layout).next_power_of_two();
-        assert_ne!(size, 0);
-        Self::alloc_new_block(size)
+    unsafe fn grow_alloc(&mut self, layout: Layout) -> NonNull<BlockHeader> {
+        let required_size = Self::alloc_size(layout).unwrap();
+        let old_block = self.block.take().unwrap();
+
+        // we failed to allocate so we need to allocate a new block.
+        let new_alloc_size = unsafe {
+            Self::block_size(old_block)
+                .checked_add(required_size)
+                .unwrap()
+                .next_power_of_two()
+        };
+
+        let mut block = Self::alloc_new_block(new_alloc_size);
+        block.as_mut().previous = Some(old_block);
+        self.block = Some(block);
+        block
     }
 
     #[cold]
+    unsafe fn grow_initial(&mut self, layout: Layout) -> NonNull<BlockHeader> {
+        let required_size = Self::alloc_size(layout).unwrap() + std::mem::size_of::<BlockHeader>();
+
+        // we failed to allocate so we need to allocate a new block.
+        let new_alloc_size = required_size.next_power_of_two();
+        assert_ne!(new_alloc_size, 0);
+
+        let block = Self::alloc_new_block(new_alloc_size);
+        self.block = Some(block);
+        block
+    }
+
+    unsafe fn block_size(block: NonNull<BlockHeader>) -> usize {
+        block.as_ref().last.offset_from(block.as_ptr().cast::<u8>()) as usize
+    }
+
     unsafe fn alloc_new_block(size: usize) -> NonNull<BlockHeader> {
         debug_assert!(size.is_power_of_two());
+        debug_assert!(size >= std::mem::size_of::<BlockHeader>());
 
-        let header_layout = Layout::new::<BlockHeader>();
-        let space_layout = Layout::from_size_align(size, header_layout.align()).unwrap();
-        let (block_layout, offset) = Layout::new::<BlockHeader>().extend(space_layout).unwrap();
+        let layout = Layout::from_size_align(size, std::mem::align_of::<BlockHeader>()).unwrap();
 
-        assert_eq!(std::mem::size_of::<BlockHeader>(), offset);
-
-        let ptr = NonNull::new(std::alloc::alloc(block_layout))
+        let ptr = NonNull::new(std::alloc::alloc(layout))
             .unwrap()
             .cast::<BlockHeader>();
 
+        let head = ptr.cast::<u8>().as_ptr().add(size);
+
         ptr.as_ptr().write(BlockHeader {
             previous: None,
-            used: 0,
-            size,
+            head,
+            last: head,
         });
 
         ptr
@@ -133,33 +160,11 @@ impl StackAllocator {
 
     #[cold]
     unsafe fn dealloc_old_block(ptr: NonNull<BlockHeader>) {
-        let size = ptr.as_ref().size;
-        let header_layout = Layout::new::<BlockHeader>();
-        let space_layout = Layout::from_size_align(size, header_layout.align()).unwrap();
-        let (block_layout, _) = Layout::new::<BlockHeader>().extend(space_layout).unwrap();
+        let size = ptr.as_ref().last.offset_from(ptr.as_ptr().cast::<u8>()) as usize;
 
-        std::alloc::dealloc(ptr.as_ptr().cast(), block_layout)
-    }
+        let layout = Layout::from_size_align(size, std::mem::align_of::<BlockHeader>()).unwrap();
 
-    unsafe fn alloc_within_block(
-        mut block: NonNull<BlockHeader>,
-        layout: Layout,
-    ) -> Option<NonNull<u8>> {
-        let size = Self::alloc_size(layout);
-        let used = block.as_ref().used;
-        if block.as_ref().size - used < size {
-            return None;
-        }
-
-        let res = block.as_ptr().add(1).cast::<u8>().add(used);
-        block.as_mut().used += size;
-        Some(NonNull::new_unchecked(res))
-    }
-
-    unsafe fn align_up(ptr: *mut u8, layout: Layout) -> *mut u8 {
-        let offset = ptr.align_offset(layout.align());
-        assert_ne!(offset, usize::MAX);
-        ptr.add(offset)
+        std::alloc::dealloc(ptr.as_ptr().cast(), layout)
     }
 }
 
