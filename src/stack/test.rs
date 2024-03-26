@@ -393,6 +393,38 @@ async fn read_cargo_spawn() {
     .unwrap();
 }
 
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn read_cargo_spawn_step() {
+    async fn deep_read(ctx: &mut Stk, n: usize) -> String {
+        // smaller ballast since tokio only allocates 2MB for its threads.
+        let mut ballast: MaybeUninit<[u8; 1024]> = std::mem::MaybeUninit::uninit();
+        std::hint::black_box(&mut ballast);
+
+        ctx.yield_now().await;
+
+        if n == 0 {
+            tokio::fs::read_to_string("./Cargo.toml").await.unwrap()
+        } else {
+            ctx.run(|ctx| deep_read(ctx, n - 1)).await
+        }
+    }
+
+    tokio::spawn(async {
+        let mut stack = Stack::new();
+        let mut runner = stack.enter(|ctx| deep_read(ctx, 200));
+
+        loop {
+            if let Some(x) = runner.step_async().await {
+                assert_eq!(x, include_str!("../../Cargo.toml"));
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+}
+
 pin_project_lite::pin_project! {
     struct ManualPoll<F, Fn> {
         #[pin]
