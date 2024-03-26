@@ -205,6 +205,7 @@ impl<'a, R> Future for ScopeStkFuture<'a, R> {
                     }
                     State::NewTask => this.stack.set_state(State::Base),
                     State::Yield => todo!(),
+                    State::Cancelled => return Poll::Pending,
                 },
             }
         })

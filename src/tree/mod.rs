@@ -57,6 +57,7 @@ impl<'a, R> Future for FinishFuture<'a, R> {
                                     return Poll::Pending;
                                 }
                             }
+                            State::Cancelled => unreachable!("TreeStack dropped while stepping"),
                             State::NewTask | State::Yield => {}
                         },
                     }
@@ -96,6 +97,7 @@ impl<'a, 'b, R> Future for StepFuture<'a, 'b, R> {
                     }
                     Poll::Pending => match self.runner.ptr.root.get_state() {
                         State::Base => return Poll::Pending,
+                        State::Cancelled => unreachable!("TreeStack dropped while stepping"),
                         State::NewTask | State::Yield => {}
                     },
                 }
