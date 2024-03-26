@@ -60,6 +60,7 @@ impl<'a, R> Future for FinishFuture<'a, R> {
                                     // Yield was requested but no new task was pushed so continue.
                                     this.runner.set_stack_state(State::Base);
                                 }
+                                State::Cancelled => return Poll::Pending,
                             },
                             Poll::Ready(_) => {
                                 tasks.pop();
@@ -101,6 +102,7 @@ impl<'a, 'b, R> Future for StepFuture<'a, 'b, R> {
                                 // Poll::pending.
                                 return Poll::Pending;
                             }
+                            State::Cancelled => return Poll::Pending,
                             State::NewTask => {
                                 // Poll::Pending was returned and a new future was created, therefore
                                 // we need to continue evaluating tasks so return Poll::Ready
@@ -176,6 +178,7 @@ impl<'a, R> Runner<'a, R> {
                                 self.set_stack_state(State::Base);
                                 break;
                             }
+                            State::Cancelled => unreachable!("Stack dropped while being finished"),
                         },
                         Poll::Ready(_) => {
                             self.ptr.tasks.pop();
@@ -209,6 +212,7 @@ impl<'a, R> Runner<'a, R> {
                         State::Yield | State::NewTask => {
                             self.set_stack_state(State::Base);
                         }
+                        State::Cancelled => unreachable!("Stack dropped while being stepped"),
                     },
                     Poll::Ready(_) => {
                         if self.ptr.tasks.len() == 0 {
@@ -261,6 +265,8 @@ pub(crate) enum State {
     NewTask,
     /// Yielding was requested by a future.
     Yield,
+    /// State used when the stack is being dropped and all the futures should be cancelledd.
+    Cancelled,
 }
 
 thread_local! {
@@ -379,12 +385,21 @@ impl Stack {
     }
 
     pub(crate) fn clear(&self) {
-        self.tasks.clear();
+        self.set_state(State::Cancelled);
+        enter_stack_context(self, || self.tasks.clear());
+        self.set_state(State::Base);
     }
 }
 
 impl Default for Stack {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for Stack {
+    fn drop(&mut self) {
+        self.set_state(State::Cancelled);
+        enter_stack_context(self, || self.tasks().clear())
     }
 }

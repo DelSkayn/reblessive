@@ -66,7 +66,9 @@ impl<'a, F, R> Drop for StkFuture<'a, F, R> {
             // F is none so we did push a task but we didn't yet return the value and it also isn't
             // in its place. Therefore the task is still on the stack and needs to be popped.
             with_stack_context(|stack| {
-                unsafe { stack.tasks().pop() };
+                if stack.get_state() != State::Cancelled {
+                    unsafe { stack.tasks().pop() };
+                }
             })
         }
     }

@@ -168,9 +168,3 @@ impl Tasks {
         }
     }
 }
-
-impl Drop for Tasks {
-    fn drop(&mut self) {
-        self.clear()
-    }
-}

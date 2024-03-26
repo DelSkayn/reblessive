@@ -449,3 +449,54 @@ fn forget_runner_and_use_again() {
     stack.enter(inner).finish();
     assert_eq!(COUNTER.get(), 2)
 }
+
+#[test]
+fn cancel_mid_run() {
+    async fn fibbo(stk: &mut Stk, f: usize) -> usize {
+        match f {
+            0 | 1 => 1,
+            x => stk.run(|stk| fibbo(stk, x - 1)).await + stk.run(|stk| fibbo(stk, x - 2)).await,
+        }
+    }
+
+    let mut stack = Stack::new();
+    {
+        let mut runner = stack.enter(|stk| fibbo(stk, 40));
+        for _ in 0..1000 {
+            assert!(runner.step().is_none());
+        }
+    }
+}
+
+#[test]
+fn drop_mid_run() {
+    async fn fibbo(stk: &mut Stk, f: usize) -> usize {
+        match f {
+            0 | 1 => 1,
+            x => stk.run(|stk| fibbo(stk, x - 1)).await + stk.run(|stk| fibbo(stk, x - 2)).await,
+        }
+    }
+
+    let mut stack = Stack::new();
+    let mut runner = stack.enter(|stk| fibbo(stk, 40));
+    for _ in 0..1000 {
+        assert!(runner.step().is_none());
+    }
+}
+
+#[test]
+fn forget_mid_run() {
+    async fn fibbo(stk: &mut Stk, f: usize) -> usize {
+        match f {
+            0 | 1 => 1,
+            x => stk.run(|stk| fibbo(stk, x - 1)).await + stk.run(|stk| fibbo(stk, x - 2)).await,
+        }
+    }
+
+    let mut stack = Stack::new();
+    let mut runner = stack.enter(|stk| fibbo(stk, 40));
+    for _ in 0..1000 {
+        assert!(runner.step().is_none());
+    }
+    std::mem::forget(runner);
+}
