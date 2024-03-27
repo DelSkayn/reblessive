@@ -81,6 +81,32 @@ fn two_depth() {
 }
 
 #[test]
+fn two_depth_step() {
+    pollster::block_on(async {
+        let mut stack = TreeStack::new();
+
+        let before = Instant::now();
+        let mut runner = stack.enter(|stk| {
+            fanout(stk, 4, |stk| async move {
+                fanout(stk, 4, |_| async move {
+                    COUNTER.with(|x| x.set(x.get() + 1));
+                    thread_sleep(Duration::from_millis(500)).await;
+                    COUNTER.with(|x| x.set(x.get() + 1));
+                })
+                .await
+            })
+        });
+
+        while runner.step().await.is_none() {}
+
+        assert!(before.elapsed() < Duration::from_millis(2000));
+        assert_eq!(COUNTER.with(|x| x.get()), 32);
+
+        // make sure the futures actually ran.
+    })
+}
+
+#[test]
 fn deep_fanout_no_overflow() {
     pollster::block_on(async {
         let mut stack = TreeStack::new();
@@ -202,6 +228,45 @@ async fn read_files() {
         .await;
 
     println!("{}", full_text);
+
+    assert!(before.elapsed() < Duration::from_millis(2000));
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn read_files_stepping() {
+    let mut stack = TreeStack::new();
+
+    async fn read_dir(stk: &ScopeStk, dir: PathBuf) -> String {
+        let mut dir = tokio::fs::read_dir(dir).await.unwrap();
+        let mut r = Vec::new();
+        while let Some(entry) = dir.next_entry().await.unwrap() {
+            let path = entry.path();
+            let kind = entry.file_type().await.unwrap();
+            if kind.is_dir() {
+                let fut = stk.run(|stk| stk.scope(|stk| read_dir(stk, path)));
+                r.push(fut)
+            } else {
+                let fut = stk
+                    .run(|_| async { tokio::fs::read_to_string(path).await.unwrap_or_default() });
+                r.push(fut)
+            }
+        }
+        join_all(r).await.join("\n=========\n")
+    }
+
+    let before = Instant::now();
+    let mut runner = stack.enter(|stk| async {
+        stk.scope(|stk| read_dir(stk, Path::new("./").to_path_buf()))
+            .await
+    });
+
+    loop {
+        if let Some(x) = runner.step().await {
+            println!("{}", x);
+            break;
+        }
+    }
 
     assert!(before.elapsed() < Duration::from_millis(2000));
 }
