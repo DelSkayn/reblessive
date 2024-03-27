@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use crate::{test::thread_sleep, Stack, Stk};
+use crate::{defer::Defer, test::thread_sleep, Stack, Stk};
 
 #[test]
 fn call_not_wrapped() {
@@ -624,5 +624,10 @@ fn forget_mid_run() {
     for _ in 0..1000 {
         assert!(runner.step().is_none());
     }
+    let place = runner.place;
     std::mem::forget(runner);
+    // Clean up memory leaked by forgetting "
+    let _defer = Defer::new((), |_| unsafe {
+        let _ = Box::from_raw(place.as_ptr());
+    });
 }
