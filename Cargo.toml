@@ -10,6 +10,7 @@ keywords = ["stack","call","async","memory","runtime"]
 repository = "https://github.com/DelSkayn/reblessive.git"
 
 [dependencies]
+atomic-waker = "1.1.2"
 futures-util = { version = "0.3.30", optional = true }
 pin-project-lite = "0.2.13"
 pin-utils = "0.1.0"

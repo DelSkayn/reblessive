@@ -232,10 +232,11 @@ impl ScopeStk {
         F: FnOnce(&'a mut Stk) -> Fut,
         Fut: Future<Output = R> + 'a,
     {
+        let future = unsafe { f(Stk::new()) };
+
         let stack = Stack::new();
         let place = Box::into_raw(Box::new(UnsafeCell::new(None)));
         let place = unsafe { NonNull::new_unchecked(place) };
-        let future = unsafe { f(Stk::new()) };
 
         stack.tasks().push(async move {
             let mut pin_future = pin!(future);

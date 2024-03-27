@@ -8,7 +8,7 @@
 //! types of patterns break the stack allocation pattern which this executor uses to be able to
 //! allocate and run futures efficiently.
 
-use crate::{stub_ctx, task::Tasks};
+use crate::{defer::Defer, stub_ctx};
 use pin_project_lite::pin_project;
 use std::{
     cell::{Cell, UnsafeCell},
@@ -21,6 +21,9 @@ use std::{
 
 mod stk;
 pub use stk::{Stk, StkFuture, YieldFuture};
+
+mod task;
+use task::StackTasks;
 
 #[cfg(test)]
 mod test;
@@ -48,24 +51,29 @@ impl<'a, R> Future for FinishFuture<'a, R> {
                     };
 
                     loop {
+                        let defer = Defer::new(tasks, |tasks| tasks.pop());
+
                         match task.drive(cx) {
-                            Poll::Pending => match this.runner.stack_state() {
-                                State::Base => return Poll::Pending,
-                                State::NewTask => {
-                                    // New task was pushed so we need to start driving that task.
-                                    this.runner.set_stack_state(State::Base);
-                                    break;
+                            Poll::Pending => {
+                                defer.take();
+                                match this.runner.stack_state() {
+                                    State::Base => return Poll::Pending,
+                                    State::NewTask => {
+                                        // New task was pushed so we need to start driving that task.
+                                        this.runner.set_stack_state(State::Base);
+                                        break;
+                                    }
+                                    State::Yield => {
+                                        // Yield was requested but no new task was pushed so continue.
+                                        this.runner.set_stack_state(State::Base);
+                                    }
+                                    State::Cancelled => {
+                                        unreachable!("Stack being dropped while actively driven")
+                                    }
                                 }
-                                State::Yield => {
-                                    // Yield was requested but no new task was pushed so continue.
-                                    this.runner.set_stack_state(State::Base);
-                                }
-                                State::Cancelled => {
-                                    unreachable!("Stack being dropped while actively driven")
-                                }
-                            },
+                            }
                             Poll::Ready(_) => {
-                                tasks.pop();
+                                std::mem::drop(defer);
                                 if tasks.is_empty() {
                                     let value = (*this.runner.place.as_ref().get()).take().unwrap();
                                     return Poll::Ready(value);
@@ -172,22 +180,27 @@ impl<'a, R> Runner<'a, R> {
 
             while let Some(mut task) = self.ptr.tasks.last() {
                 loop {
+                    let this = Defer::new(self.ptr, |this| {
+                        this.tasks.pop();
+                    });
                     match task.drive(&mut context) {
-                        Poll::Pending => match self.stack_state() {
-                            State::Yield => {
-                                self.set_stack_state(State::Base);
+                        Poll::Pending => {
+                            this.take();
+                            match self.stack_state() {
+                                State::Yield => {
+                                    self.set_stack_state(State::Base);
+                                }
+                                State::Base => {}
+                                State::NewTask => {
+                                    self.set_stack_state(State::Base);
+                                    break;
+                                }
+                                State::Cancelled => {
+                                    unreachable!("Stack being dropped while actively driven.")
+                                }
                             }
-                            State::Base => {}
-                            State::NewTask => {
-                                self.set_stack_state(State::Base);
-                                break;
-                            }
-                            State::Cancelled => {
-                                unreachable!("Stack being dropped while actively driven.")
-                            }
-                        },
+                        }
                         Poll::Ready(_) => {
-                            self.ptr.tasks.pop();
                             break;
                         }
                     }
@@ -309,7 +322,7 @@ where
 /// and has no support for waking tasks by itself.
 pub struct Stack {
     state: Cell<State>,
-    tasks: Tasks,
+    tasks: StackTasks,
 }
 
 unsafe impl Send for Stack {}
@@ -322,7 +335,7 @@ impl Stack {
     pub fn new() -> Self {
         Stack {
             state: Cell::new(State::Base),
-            tasks: Tasks::new(),
+            tasks: StackTasks::new(),
         }
     }
 
@@ -331,7 +344,7 @@ impl Stack {
     pub fn with_capacity(cap: usize) -> Self {
         Stack {
             state: Cell::new(State::Base),
-            tasks: Tasks::with_capacity(cap),
+            tasks: StackTasks::with_capacity(cap),
         }
     }
 
@@ -365,20 +378,24 @@ impl Stack {
     }
 
     pub(crate) fn drive_head(&self, cx: &mut Context) -> Poll<()> {
-        let Some(mut task) = self.tasks.last() else {
+        let this = Defer::new(self, |this| unsafe {
+            // Ensure that if the task panics it is being dropped
+            this.tasks().pop();
+        });
+        let Some(mut task) = this.tasks.last() else {
             panic!("Missing tasks");
         };
 
         match unsafe { task.drive(cx) } {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(_) => {
-                unsafe { self.tasks.pop() };
-                Poll::Ready(())
+            Poll::Pending => {
+                this.take();
+                Poll::Pending
             }
+            Poll::Ready(_) => Poll::Ready(()),
         }
     }
 
-    pub(crate) fn tasks(&self) -> &Tasks {
+    pub(crate) fn tasks(&self) -> &StackTasks {
         &self.tasks
     }
 

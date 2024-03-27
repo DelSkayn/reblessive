@@ -3,11 +3,12 @@
 mod allocator;
 pub mod stack;
 mod stub_ctx;
-mod task;
 
+mod defer;
 #[cfg(feature = "tree")]
 #[cfg_attr(docrs, doc(cfg(feature = "tree")))]
 pub mod tree;
+mod vtable;
 
 #[cfg(feature = "tree")]
 #[doc(inline)]

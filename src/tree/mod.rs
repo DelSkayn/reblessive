@@ -14,6 +14,7 @@ use std::{
 
 mod schedular;
 use schedular::Schedular;
+pub(crate) use schedular::SchedularVTable;
 
 mod stk;
 pub use stk::{ScopeFuture, Stk, StkFuture};
@@ -35,7 +36,7 @@ impl<'a, R> Future for FinishFuture<'a, R> {
                 loop {
                     // First we need finish all fanout futures.
                     while !self.runner.ptr.fanout.is_empty() {
-                        if self.runner.ptr.fanout.poll(cx).is_pending() {
+                        if unsafe { self.runner.ptr.fanout.poll(cx) }.is_pending() {
                             return Poll::Pending;
                         }
                     }
@@ -79,7 +80,7 @@ impl<'a, 'b, R> Future for StepFuture<'a, 'b, R> {
         enter_stack_context(&self.runner.ptr.root, || {
             enter_tree_context(&self.runner.ptr.fanout, || {
                 if !self.runner.ptr.fanout.is_empty() {
-                    if self.runner.ptr.fanout.poll(cx).is_pending() {
+                    if unsafe { self.runner.ptr.fanout.poll(cx) }.is_pending() {
                         return Poll::Pending;
                     }
                 }
