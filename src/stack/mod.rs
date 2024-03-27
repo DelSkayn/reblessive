@@ -20,6 +20,8 @@ use std::{
 };
 
 mod stk;
+#[cfg(feature = "tree")]
+pub(crate) use stk::{InnerStkFuture, StackMarker};
 pub use stk::{Stk, StkFuture, YieldFuture};
 
 mod task;

@@ -9,25 +9,30 @@ use std::{
     task::{Context, Poll},
 };
 
-/// Future returned by [`Stk::run`]
-///
-/// Should be immediatly polled when created and driven until finished.
-#[must_use = "futures do nothing unless you `.await` or poll them"]
-pub struct StkFuture<'a, F, R> {
-    // The function to execute to get the future
-    f: Option<F>,
-    completed: bool,
-    // The place where the future will store the result.
-    res: UnsafeCell<Option<R>>,
-    // The future holds onto the ctx mutably to prevent another future being pushed before the
-    // current is polled.
-    _marker: PhantomData<&'a mut Stk>,
+pub trait StackMarker: 'static {
+    unsafe fn create() -> &'static mut Self;
 }
 
-impl<'a, F, Fut, R> Future for StkFuture<'a, F, R>
+impl StackMarker for Stk {
+    unsafe fn create() -> &'static mut Self {
+        Stk::new()
+    }
+}
+
+pub(crate) struct InnerStkFuture<'a, F, R, M> {
+    // The function to execute to get the future
+    pub(crate) f: Option<F>,
+    pub(crate) completed: bool,
+    // The place where the future will store the result.
+    pub(crate) res: UnsafeCell<Option<R>>,
+    pub(crate) _marker: PhantomData<&'a mut M>,
+}
+
+impl<'a, F, Fut, R, M> Future for InnerStkFuture<'a, F, R, M>
 where
-    F: FnOnce(&'a mut Stk) -> Fut,
+    F: FnOnce(&'a mut M) -> Fut,
     Fut: Future<Output = R> + 'a,
+    M: StackMarker,
 {
     type Output = R;
 
@@ -39,7 +44,7 @@ where
             if let Some(x) = this.f.take() {
                 with_stack_context(|stack| {
                     let place = NonNull::from(&this.res);
-                    let fut = (x)(Stk::new());
+                    let fut = (x)(M::create());
 
                     stack
                         .tasks
@@ -60,7 +65,7 @@ where
     }
 }
 
-impl<'a, F, R> Drop for StkFuture<'a, F, R> {
+impl<'a, F, R, M> Drop for InnerStkFuture<'a, F, R, M> {
     fn drop(&mut self) {
         if self.f.is_none() && !self.completed && self.res.get_mut().is_none() {
             // F is none so we did push a task but we didn't yet return the value and it also isn't
@@ -71,6 +76,30 @@ impl<'a, F, R> Drop for StkFuture<'a, F, R> {
                 }
             })
         }
+    }
+}
+
+pin_project! {
+    /// Future returned by [`Stk::run`]
+    ///
+    /// Should be immediatly polled when created and driven until finished.
+    #[must_use = "futures do nothing unless you `.await` or poll them"]
+    pub struct StkFuture<'a, F, R> {
+        #[pin]
+        inner: InnerStkFuture<'a, F, R, Stk>,
+    }
+}
+
+impl<'a, F, Fut, R> Future for StkFuture<'a, F, R>
+where
+    F: FnOnce(&'a mut Stk) -> Fut,
+    Fut: Future<Output = R> + 'a,
+{
+    type Output = R;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.project();
+        this.inner.poll(cx)
     }
 }
 
@@ -117,10 +146,12 @@ impl Stk {
         Fut: Future<Output = R> + 'a,
     {
         StkFuture {
-            completed: false,
-            f: Some(f),
-            res: UnsafeCell::new(None),
-            _marker: PhantomData,
+            inner: InnerStkFuture {
+                completed: false,
+                f: Some(f),
+                res: UnsafeCell::new(None),
+                _marker: PhantomData,
+            },
         }
     }
 
