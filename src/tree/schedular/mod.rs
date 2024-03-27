@@ -21,6 +21,7 @@ use self::queue::NodeHeader;
 
 #[derive(Debug, Clone)]
 pub(crate) struct SchedularVTable {
+    task_drive: unsafe fn(NonNull<Task<u8>>, cx: &mut Context) -> Poll<()>,
     task_drop: unsafe fn(NonNull<Task<u8>>),
 }
 
@@ -28,11 +29,17 @@ impl SchedularVTable {
     pub const fn get<F: Future<Output = ()>>() -> SchedularVTable {
         SchedularVTable {
             task_drop: Self::drop::<F>,
+            task_drive: Self::drive::<F>,
         }
     }
 
     unsafe fn drop<F: Future<Output = ()>>(ptr: NonNull<Task<u8>>) {
         Arc::decrement_strong_count(ptr.cast::<Task<F>>().as_ptr())
+    }
+
+    unsafe fn drive<F: Future<Output = ()>>(ptr: NonNull<Task<u8>>, cx: &mut Context) -> Poll<()> {
+        let ptr = ptr.cast::<Task<F>>();
+        Pin::new_unchecked(&mut (*ptr.as_ref().future.get())).poll(cx)
     }
 }
 
@@ -153,8 +160,7 @@ impl Schedular {
     }
 
     unsafe fn drive_task(ptr: NonNull<Task<u8>>, ctx: &mut Context) -> Poll<()> {
-        let future_ptr = NonNull::new_unchecked(ptr.as_ref().future.get());
-        (ptr.as_ref().body.vtable.driver)(future_ptr, ctx)
+        (ptr.as_ref().body.vtable.tree.task_drive)(ptr, ctx)
     }
 
     pub unsafe fn poll(&self, cx: &mut Context) -> Poll<()> {

@@ -365,8 +365,9 @@ impl Stack {
             let place_ptr = NonNull::new_unchecked(Box::into_raw(place));
             let fut = (f)(ctx);
 
-            self.tasks
-                .push(async move { place_ptr.as_ref().get().write(Some(fut.await)) });
+            self.tasks.push(async move {
+                place_ptr.as_ref().get().write(Some(fut.await));
+            });
 
             Runner {
                 place: place_ptr,

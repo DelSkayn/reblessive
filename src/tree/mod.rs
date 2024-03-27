@@ -85,7 +85,7 @@ impl<'a, 'b, R> Future for StepFuture<'a, 'b, R> {
                     }
                 }
 
-                // No futures left in fanout, run on the root stack.
+                // No futures left in fanout, run on the root stack.l
                 match self.runner.ptr.root.drive_head(cx) {
                     Poll::Ready(_) => {
                         if self.runner.ptr.root.tasks().is_empty() {
@@ -97,7 +97,13 @@ impl<'a, 'b, R> Future for StepFuture<'a, 'b, R> {
                         }
                     }
                     Poll::Pending => match self.runner.ptr.root.get_state() {
-                        State::Base => return Poll::Pending,
+                        State::Base => {
+                            if self.runner.ptr.fanout.is_empty() {
+                                return Poll::Pending;
+                            } else {
+                                return Poll::Ready(None);
+                            }
+                        }
                         State::Cancelled => unreachable!("TreeStack dropped while stepping"),
                         State::NewTask | State::Yield => {}
                     },
