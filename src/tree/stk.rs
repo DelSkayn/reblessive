@@ -163,23 +163,27 @@ impl<'a, R> Future for ScopeStkFuture<'a, R> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = unsafe { self.get_unchecked_mut() };
-        enter_stack_context(&this.stack, || loop {
-            match this.stack.drive_head(cx) {
-                Poll::Pending => {
-                    return Poll::Pending;
-                }
-                Poll::Ready(_) => match this.stack.get_state() {
-                    State::Base => {
-                        if let Some(x) = unsafe { (*this.place.as_ref().get()).take() } {
-                            return Poll::Ready(x);
+        with_stack_context(|parent_stack| {
+            enter_stack_context(&this.stack, || loop {
+                match this.stack.drive_head(cx) {
+                    Poll::Ready(_) => {
+                        if this.stack.tasks().is_empty() {
+                            let res = unsafe { (*this.place.as_ref().get()).take().unwrap() };
+                            return Poll::Ready(res);
                         }
-                        return Poll::Pending;
                     }
-                    State::NewTask => this.stack.set_state(State::Base),
-                    State::Yield => todo!(),
-                    State::Cancelled => return Poll::Pending,
-                },
-            }
+                    Poll::Pending => match this.stack.get_state() {
+                        State::Base => return Poll::Pending,
+                        State::NewTask => this.stack.set_state(State::Base),
+                        State::Yield => {
+                            this.stack.set_state(State::Base);
+                            parent_stack.set_state(State::Yield);
+                            return Poll::Pending;
+                        }
+                        State::Cancelled => return Poll::Pending,
+                    },
+                }
+            })
         })
     }
 }

@@ -81,6 +81,37 @@ fn two_depth() {
 }
 
 #[test]
+fn basic_then_deep() {
+    pollster::block_on(async {
+        let mut stack = TreeStack::new();
+
+        async fn go_deep(stk: &mut Stk, depth: usize) {
+            if depth == 0 {
+                COUNTER.with(|x| x.set(x.get() + 1));
+                thread_sleep(Duration::from_millis(500)).await;
+                COUNTER.with(|x| x.set(x.get() + 1));
+            } else {
+                stk.run(|stk| go_deep(stk, depth - 1)).await
+            }
+        }
+
+        let before = Instant::now();
+        stack
+            .enter(|stk| {
+                fanout(stk, 10, |stk| async move {
+                    go_deep(stk, 10).await;
+                })
+            })
+            .finish()
+            .await;
+
+        assert!(before.elapsed() < Duration::from_millis(2000));
+        // make sure the futures actually ran.
+        assert_eq!(COUNTER.with(|x| x.get()), 20);
+    })
+}
+
+#[test]
 fn two_depth_step() {
     pollster::block_on(async {
         let mut stack = TreeStack::new();
