@@ -425,12 +425,9 @@ async fn read_cargo_spawn_step() {
     .unwrap();
 }
 
-pin_project_lite::pin_project! {
-    struct ManualPoll<F, Fn> {
-        #[pin]
-        future: F,
-        poll: Fn,
-    }
+struct ManualPoll<F, Fn> {
+    future: F,
+    poll: Fn,
 }
 
 impl<F, R, Fn> ManualPoll<F, Fn>
@@ -451,12 +448,9 @@ where
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.project();
-        if (*this.poll)(this.future, cx).is_ready() {
-            Poll::Ready(())
-        } else {
-            Poll::Pending
-        }
+        let this = unsafe { self.get_unchecked_mut() };
+        let future = unsafe { Pin::new_unchecked(&mut this.future) };
+        (&mut this.poll)(future, cx).map(|_| ())
     }
 }
 

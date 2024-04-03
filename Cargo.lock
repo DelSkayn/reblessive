@@ -243,7 +243,6 @@ version = "0.3.2"
 dependencies = [
  "atomic-waker",
  "futures-util",
- "pin-project-lite",
  "pin-utils",
  "pollster",
  "tokio",

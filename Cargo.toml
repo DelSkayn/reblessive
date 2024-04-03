@@ -11,16 +11,15 @@ repository = "https://github.com/DelSkayn/reblessive.git"
 
 [dependencies]
 atomic-waker = "1.1.2"
-futures-util = { version = "0.3.30", optional = true }
-pin-project-lite = "0.2.13"
 pin-utils = "0.1.0"
 
 [dev-dependencies]
+futures-util = "0.3.30"
 pollster = "0.3.0"
 tokio = { version = "1.36.0", features = ["full"] }
 
 [features]
-tree = ["dep:futures-util"]
+tree = []
 
 [package.metadata.docs.rs]
 # document all features

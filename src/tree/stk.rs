@@ -1,5 +1,4 @@
-use futures_util::future::poll_fn;
-use pin_project_lite::pin_project;
+use pin_utils::{unsafe_pinned, unsafe_unpinned};
 
 use super::{with_tree_context, TreeStack};
 use crate::{
@@ -12,10 +11,10 @@ use std::{
     cell::UnsafeCell,
     future::Future,
     marker::PhantomData,
-    pin::{pin, Pin},
+    pin::Pin,
     ptr::NonNull,
     sync::Arc,
-    task::{ready, Context, Poll},
+    task::{Context, Poll},
 };
 
 impl StackMarker for Stk {
@@ -24,15 +23,16 @@ impl StackMarker for Stk {
     }
 }
 
-pin_project! {
-    /// Future returned by [`Stk::run`]
-    ///
-    /// Should be immediatly polled when created and driven until finished.
-    #[must_use = "futures do nothing unless you `.await` or poll them"]
-    pub struct StkFuture<'a, F, R> {
-        #[pin]
-        inner: InnerStkFuture<'a, F, R, Stk>,
-    }
+/// Future returned by [`Stk::run`]
+///
+/// Should be immediatly polled when created and driven until finished.
+#[must_use = "futures do nothing unless you `.await` or poll them"]
+pub struct StkFuture<'a, F, R> {
+    inner: InnerStkFuture<'a, F, R, Stk>,
+}
+
+impl<'a, F, R> StkFuture<'a, F, R> {
+    unsafe_pinned!(inner: InnerStkFuture<'a, F, R, Stk>);
 }
 
 impl<'a, F, Fut, R> Future for StkFuture<'a, F, R>
@@ -43,8 +43,8 @@ where
     type Output = R;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.project();
-        this.inner.poll(cx)
+        let inner = self.inner();
+        inner.poll(cx)
     }
 }
 
@@ -154,8 +154,8 @@ impl<'a, R> Drop for ScopeStkFuture<'a, R> {
 }
 
 impl<'a, R> ScopeStkFuture<'a, R> {
-    pin_utils::unsafe_unpinned!(stack: Stack);
-    pin_utils::unsafe_unpinned!(place: NonNull<UnsafeCell<Option<R>>>);
+    unsafe_unpinned!(stack: Stack);
+    unsafe_unpinned!(place: NonNull<UnsafeCell<Option<R>>>);
 }
 
 impl<'a, R> Future for ScopeStkFuture<'a, R> {
@@ -214,15 +214,9 @@ impl ScopeStk {
         let place = Box::into_raw(Box::new(UnsafeCell::new(None)));
         let place = unsafe { NonNull::new_unchecked(place) };
 
-        stack.tasks().push(async move {
-            let mut pin_future = pin!(future);
-            poll_fn(move |cx: &mut Context| -> Poll<()> {
-                let res = ready!(pin_future.as_mut().poll(cx));
-                unsafe { place.as_ref().get().write(Some(res)) };
-                Poll::Ready(())
-            })
-            .await
-        });
+        stack
+            .tasks()
+            .push(async move { unsafe { place.as_ref().get().write(Some(future.await)) } });
 
         ScopeStkFuture {
             place,

@@ -9,7 +9,6 @@
 //! allocate and run futures efficiently.
 
 use crate::{defer::Defer, stub_ctx};
-use pin_project_lite::pin_project;
 use std::{
     cell::{Cell, UnsafeCell},
     future::Future,
@@ -30,12 +29,10 @@ use task::StackTasks;
 #[cfg(test)]
 mod test;
 
-pin_project! {
-    /// Future returned by [`Runner::finish_async`]
-    #[must_use = "futures do nothing unless you `.await` or poll them"]
-    pub struct FinishFuture<'a,R>{
-        runner: Runner<'a,R>
-    }
+/// Future returned by [`Runner::finish_async`]
+#[must_use = "futures do nothing unless you `.await` or poll them"]
+pub struct FinishFuture<'a, R> {
+    runner: Runner<'a, R>,
 }
 
 impl<'a, R> Future for FinishFuture<'a, R> {
@@ -43,9 +40,8 @@ impl<'a, R> Future for FinishFuture<'a, R> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         enter_stack_context(self.runner.ptr, || {
-            let this = self.project();
             unsafe {
-                let tasks = &this.runner.ptr.tasks;
+                let tasks = &self.runner.ptr.tasks;
 
                 loop {
                     let Some(mut task) = tasks.last() else {
@@ -58,16 +54,16 @@ impl<'a, R> Future for FinishFuture<'a, R> {
                         match task.drive(cx) {
                             Poll::Pending => {
                                 defer.take();
-                                match this.runner.stack_state() {
+                                match self.runner.stack_state() {
                                     State::Base => return Poll::Pending,
                                     State::NewTask => {
                                         // New task was pushed so we need to start driving that task.
-                                        this.runner.set_stack_state(State::Base);
+                                        self.runner.set_stack_state(State::Base);
                                         break;
                                     }
                                     State::Yield => {
                                         // Yield was requested but no new task was pushed so continue.
-                                        this.runner.set_stack_state(State::Base);
+                                        self.runner.set_stack_state(State::Base);
                                     }
                                     State::Cancelled => {
                                         unreachable!("Stack being dropped while actively driven")
@@ -77,7 +73,7 @@ impl<'a, R> Future for FinishFuture<'a, R> {
                             Poll::Ready(_) => {
                                 std::mem::drop(defer);
                                 if tasks.is_empty() {
-                                    let value = (*this.runner.place.as_ref().get()).take().unwrap();
+                                    let value = (*self.runner.place.as_ref().get()).take().unwrap();
                                     return Poll::Ready(value);
                                 }
                                 break;
@@ -90,12 +86,10 @@ impl<'a, R> Future for FinishFuture<'a, R> {
     }
 }
 
-pin_project! {
-    /// Future returned by [`Runner::step_async`]
-    #[must_use = "futures do nothing unless you `.await` or poll them"]
-    pub struct StepFuture<'a,'b,R>{
-        runner: &'a mut Runner<'b,R>
-    }
+/// Future returned by [`Runner::step_async`]
+#[must_use = "futures do nothing unless you `.await` or poll them"]
+pub struct StepFuture<'a, 'b, R> {
+    runner: &'a mut Runner<'b, R>,
 }
 
 impl<'a, 'b, R> Future for StepFuture<'a, 'b, R> {
@@ -103,11 +97,10 @@ impl<'a, 'b, R> Future for StepFuture<'a, 'b, R> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         enter_stack_context(self.runner.ptr, || {
-            let this = self.project();
             unsafe {
-                match this.runner.ptr.drive_head(cx) {
+                match self.runner.ptr.drive_head(cx) {
                     Poll::Pending => {
-                        match this.runner.ptr.get_state() {
+                        match self.runner.ptr.get_state() {
                             State::Base => {
                                 // A poll::pending was returned but no new task was created.
                                 // Thus we are waiting on an external future, and need to return
@@ -130,9 +123,9 @@ impl<'a, 'b, R> Future for StepFuture<'a, 'b, R> {
                         }
                     }
                     Poll::Ready(_) => {
-                        if this.runner.ptr.tasks().is_empty() {
+                        if self.runner.ptr.tasks().is_empty() {
                             return Poll::Ready(Some(
-                                (*this.runner.place.as_ref().get()).take().unwrap(),
+                                (*self.runner.place.as_ref().get()).take().unwrap(),
                             ));
                         }
                         Poll::Ready(None)

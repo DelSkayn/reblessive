@@ -1,5 +1,6 @@
+use pin_utils::{unsafe_pinned, unsafe_unpinned};
+
 use crate::stack::{with_stack_context, Stack, State};
-use pin_project_lite::pin_project;
 use std::{
     cell::UnsafeCell,
     future::Future,
@@ -79,15 +80,16 @@ impl<'a, F, R, M> Drop for InnerStkFuture<'a, F, R, M> {
     }
 }
 
-pin_project! {
-    /// Future returned by [`Stk::run`]
-    ///
-    /// Should be immediatly polled when created and driven until finished.
-    #[must_use = "futures do nothing unless you `.await` or poll them"]
-    pub struct StkFuture<'a, F, R> {
-        #[pin]
-        inner: InnerStkFuture<'a, F, R, Stk>,
-    }
+/// Future returned by [`Stk::run`]
+///
+/// Should be immediatly polled when created and driven until finished.
+#[must_use = "futures do nothing unless you `.await` or poll them"]
+pub struct StkFuture<'a, F, R> {
+    inner: InnerStkFuture<'a, F, R, Stk>,
+}
+
+impl<'a, F, R> StkFuture<'a, F, R> {
+    unsafe_pinned!(inner: InnerStkFuture<'a, F, R, Stk>);
 }
 
 impl<'a, F, Fut, R> Future for StkFuture<'a, F, R>
@@ -98,27 +100,29 @@ where
     type Output = R;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.project();
-        this.inner.poll(cx)
+        let inner = self.inner();
+        inner.poll(cx)
     }
 }
 
-pin_project! {
-    /// Future returned by [`Stk::yield_now`]
-    #[must_use = "futures do nothing unless you `.await` or poll them"]
-    pub struct YieldFuture{
-        pub(crate) done: bool,
-    }
+/// Future returned by [`Stk::yield_now`]
+#[must_use = "futures do nothing unless you `.await` or poll them"]
+pub struct YieldFuture {
+    pub(crate) done: bool,
+}
+
+impl YieldFuture {
+    unsafe_unpinned!(done: bool);
 }
 
 impl Future for YieldFuture {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.project();
+        let done = self.done();
         with_stack_context(|stack| {
-            if !*this.done {
-                *this.done = true;
+            if !*done {
+                *done = true;
                 stack.set_state(State::Yield);
                 return Poll::Pending;
             }
