@@ -1,12 +1,16 @@
 use futures_util::future::join_all;
 
 use super::{Stk, TreeStack};
-use crate::{test::thread_sleep, tree::stk::ScopeStk};
+use crate::{
+    test::{thread_sleep, ManualPoll},
+    tree::stk::ScopeStk,
+};
 use std::{
     cell::Cell,
     future::Future,
     mem::MaybeUninit,
     path::{Path, PathBuf},
+    task::Poll,
     time::{Duration, Instant},
 };
 
@@ -198,6 +202,40 @@ fn deep_no_overflow() {
             .await;
         assert_eq!(res, "Foo")
     })
+}
+
+#[test]
+fn cancel_scope_future() {
+    pollster::block_on(async {
+        let mut stack = TreeStack::new();
+        stack
+            .enter(|stk| async {
+                let scope = stk.scope(|stk| async {
+                    stk.run(|stk| async {
+                        stk.yield_now().await;
+                        // future should be canceled before this point
+                        panic!();
+                    })
+                    .await
+                });
+
+                let mut first = true;
+                ManualPoll::wrap(scope, move |future, ctx| {
+                    if first {
+                        first = false;
+
+                        assert!(matches!(future.poll(ctx), Poll::Pending));
+                        Poll::Pending
+                    } else {
+                        // first poll done, return read so we can cancel it.
+                        Poll::Ready(())
+                    }
+                });
+                stk.yield_now().await;
+            })
+            .finish()
+            .await;
+    });
 }
 
 #[tokio::test]

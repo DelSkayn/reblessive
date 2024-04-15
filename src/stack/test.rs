@@ -7,7 +7,13 @@ use std::{
     time::Duration,
 };
 
-use crate::{defer::Defer, test::thread_sleep, Stack, Stk};
+use tokio::pin;
+
+use crate::{
+    defer::Defer,
+    test::{thread_sleep, ManualPoll},
+    Stack, Stk,
+};
 
 #[test]
 fn call_not_wrapped() {
@@ -425,35 +431,6 @@ async fn read_cargo_spawn_step() {
     .unwrap();
 }
 
-struct ManualPoll<F, Fn> {
-    future: F,
-    poll: Fn,
-}
-
-impl<F, R, Fn> ManualPoll<F, Fn>
-where
-    F: Future<Output = R>,
-    Fn: FnMut(Pin<&mut F>, &mut Context) -> Poll<()>,
-{
-    fn wrap(future: F, poll: Fn) -> Self {
-        ManualPoll { future, poll }
-    }
-}
-
-impl<F, R, Fn> Future for ManualPoll<F, Fn>
-where
-    F: Future<Output = R>,
-    Fn: FnMut(Pin<&mut F>, &mut Context) -> Poll<()>,
-{
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = unsafe { self.get_unchecked_mut() };
-        let future = unsafe { Pin::new_unchecked(&mut this.future) };
-        (&mut this.poll)(future, cx).map(|_| ())
-    }
-}
-
 #[test]
 fn poll_once_then_drop() {
     let mut stack = Stack::new();
@@ -562,6 +539,38 @@ fn forget_runner_and_use_again() {
         stk.run(other).await;
         std::mem::drop(stk.run(other));
         stk.run(other).await;
+    }
+
+    let runner = stack.enter(inner);
+    std::mem::forget(runner);
+    stack.enter(inner).finish();
+    assert_eq!(COUNTER.get(), 2)
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+#[should_panic]
+fn enter_after_enter() {
+    thread_local! {
+        static COUNTER: Cell<usize> = const{ Cell::new(0)};
+    }
+
+    let mut stack = Stack::new();
+
+    async fn inner(stk: &mut Stk) {
+        let first = stk.run(|stk| stk.yield_now());
+
+        let second = Stk::enter_run(|stk| stk.yield_now());
+
+        ManualPoll::wrap((first, second), |f, ctx| {
+            let (a, b) = unsafe { f.get_unchecked_mut() };
+
+            let _ = unsafe { Pin::new_unchecked(a) }.poll(ctx);
+            let _ = unsafe { Pin::new_unchecked(b) }.poll(ctx);
+
+            Poll::Pending
+        })
+        .await
     }
 
     let runner = stack.enter(inner);

@@ -1,6 +1,6 @@
 use pin_utils::{unsafe_pinned, unsafe_unpinned};
 
-use super::{with_tree_context, TreeStack};
+use super::{schedular::CancelToken, with_tree_context, TreeStack};
 use crate::{
     stack::{
         enter_stack_context, with_stack_context, InnerStkFuture, StackMarker, State, YieldFuture,
@@ -25,7 +25,8 @@ impl StackMarker for Stk {
 
 /// Future returned by [`Stk::run`]
 ///
-/// Should be immediatly polled when created and driven until finished.
+/// Should be finished completely after the first polling before any other futures returned by [`Stk`] are polled.
+/// Failing to do so will cause a panic.
 #[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct StkFuture<'a, F, R> {
     inner: InnerStkFuture<'a, F, R, Stk>,
@@ -48,14 +49,21 @@ where
     }
 }
 
-pub struct ScopeFuture<'a, F, R> {
-    entry: Option<F>,
-    place: Arc<UnsafeCell<Option<R>>>,
-    _marker: PhantomData<&'a Stk>,
+enum ScopeState<F> {
+    Init(F),
+    Running(CancelToken),
+    Empty,
 }
 
-impl<'a, F, R> ScopeFuture<'a, F, R> {
-    pin_utils::unsafe_unpinned!(entry: Option<F>);
+/// Future returned by [`Stk::scope`]
+///
+/// Should be finished completely after the first polling before any other futures returned by [`Stk`] are polled.
+/// Failing to do so will cause a panic.
+#[must_use = "futures do nothing unless you `.await` or poll them"]
+pub struct ScopeFuture<'a, F, R> {
+    state: ScopeState<F>,
+    place: Arc<UnsafeCell<Option<R>>>,
+    _marker: PhantomData<&'a Stk>,
 }
 
 impl<'a, F, Fut, R> Future for ScopeFuture<'a, F, R>
@@ -68,25 +76,31 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = unsafe { self.get_unchecked_mut() };
-        if let Some(x) = this.entry.take() {
-            with_tree_context(|fanout| {
-                let fut = unsafe { (x)(ScopeStk::new()) };
-                let place = this.place.clone();
-                let waker = cx.waker().clone();
-                unsafe {
-                    fanout.push(async move {
-                        place.get().write(Some(fut.await));
-                        waker.wake();
-                    })
-                }
-            });
-            Poll::Pending
-        } else {
-            if let Some(x) = unsafe { std::ptr::replace(this.place.get(), None) } {
-                Poll::Ready(x)
-            } else {
+        match std::mem::replace(&mut this.state, ScopeState::Empty) {
+            ScopeState::Init(init) => {
+                with_tree_context(|fanout| {
+                    let fut = unsafe { (init)(ScopeStk::new()) };
+                    let place = this.place.clone();
+                    let waker = cx.waker().clone();
+                    unsafe {
+                        let cancel = fanout.push_cancellable(async move {
+                            place.get().write(Some(fut.await));
+                            waker.wake();
+                        });
+                        this.state = ScopeState::Running(cancel);
+                    }
+                });
                 Poll::Pending
             }
+            ScopeState::Running(x) => {
+                this.state = ScopeState::Running(x);
+                if let Some(x) = unsafe { std::ptr::replace(this.place.get(), None) } {
+                    Poll::Ready(x)
+                } else {
+                    Poll::Pending
+                }
+            }
+            ScopeState::Empty => unreachable!(),
         }
     }
 }
@@ -112,7 +126,31 @@ impl Stk {
         StkFuture {
             inner: InnerStkFuture {
                 f: Some(f),
-                completed: false,
+                running: false,
+                res: UnsafeCell::new(None),
+                _marker: PhantomData,
+            },
+        }
+    }
+
+    /// A less type-safe version of Stk::run which doesn't require passing arround a Stk object.
+    /// Invalid use of this function can cause a panic or deadlocking an executor.
+    ///
+    /// # Panic
+    /// This function will panic while not within a TreeStack
+    /// The future returned by this function will panic if another stack futures is created which
+    /// is not contained within the future returned by this function while the current future is
+    /// still running
+    pub fn enter_run<'a, F, Fut, R>(f: F) -> StkFuture<'a, F, R>
+    where
+        F: FnOnce(&'a mut Stk) -> Fut,
+        Fut: Future<Output = R> + 'a,
+    {
+        with_tree_context(|_| ());
+        StkFuture {
+            inner: InnerStkFuture {
+                f: Some(f),
+                running: false,
                 res: UnsafeCell::new(None),
                 _marker: PhantomData,
             },
@@ -133,7 +171,7 @@ impl Stk {
         Fut: Future<Output = R> + 'a,
     {
         ScopeFuture {
-            entry: Some(f),
+            state: ScopeState::Init(f),
             place: Arc::new(UnsafeCell::new(None)),
             _marker: PhantomData,
         }

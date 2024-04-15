@@ -59,7 +59,9 @@ impl<'a, R> Future for FinishFuture<'a, R> {
                                 }
                             }
                             State::Cancelled => unreachable!("TreeStack dropped while stepping"),
-                            State::NewTask | State::Yield => {}
+                            State::NewTask | State::Yield => {
+                                self.runner.ptr.root.set_state(State::Base);
+                            }
                         },
                     }
                 }
@@ -105,7 +107,9 @@ impl<'a, 'b, R> Future for StepFuture<'a, 'b, R> {
                             }
                         }
                         State::Cancelled => unreachable!("TreeStack dropped while stepping"),
-                        State::NewTask | State::Yield => {}
+                        State::NewTask | State::Yield => {
+                            self.runner.ptr.root.set_state(State::Base);
+                        }
                     },
                 }
                 Poll::Ready(None)
@@ -119,6 +123,9 @@ pub struct Runner<'a, R> {
     ptr: &'a TreeStack,
     _stack_marker: PhantomData<&'a mut TreeStack>,
 }
+
+unsafe impl<'a, R> Send for Runner<'a, R> {}
+unsafe impl<'a, R> Sync for Runner<'a, R> {}
 
 impl<'a, R> Runner<'a, R> {
     pub fn finish(self) -> FinishFuture<'a, R> {
@@ -171,6 +178,9 @@ pub struct TreeStack {
     root: Stack,
     fanout: Schedular,
 }
+
+unsafe impl Send for TreeStack {}
+unsafe impl Sync for TreeStack {}
 
 impl TreeStack {
     pub fn new() -> Self {

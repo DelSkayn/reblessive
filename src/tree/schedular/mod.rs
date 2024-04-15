@@ -19,6 +19,52 @@ use crate::{defer::Defer, vtable::VTable};
 
 use self::queue::NodeHeader;
 
+pub struct CancelToken(NonNull<Task<u8>>);
+
+impl CancelToken {
+    pub fn detach(self) {
+        // properly drop the pointer,
+        // Safety: Below self is forgotten, so it won't be dropped twice.
+        unsafe { Schedular::drop_task(self.0) };
+        // forget so the drop impl wont run.
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for CancelToken {
+    fn drop(&mut self) {
+        let rf = unsafe { self.0.as_ref() };
+        // Set queued to prefend it from
+        if matches!(rf.body.done.get(), TaskState::Cancelled | TaskState::Done) {
+            // Safety: weak only dropped hear and when detached, in which case this won't run so this is sound.
+            unsafe { Schedular::drop_task(self.0) };
+            return;
+        }
+
+        rf.body.done.set(TaskState::Cancelled);
+
+        if rf
+            .body
+            .queued
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            // Task wasn't scheduled yet, add it so it can be remove from the list.
+            // If the queue was already dropped the task will be cancelled already.
+            if let Some(queue) = rf.body.queue.upgrade() {
+                unsafe {
+                    Pin::new_unchecked(&*queue).push(self.0.cast());
+                    queue.waker().wake();
+                }
+                // we transfered the ownership to the queue, so we dont need to run drop.
+                return;
+            }
+        }
+        // Safety: weak only dropped hear and when detached, in which case this won't run so this is sound.
+        unsafe { Schedular::drop_task(self.0) };
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct SchedularVTable {
     task_drive: unsafe fn(NonNull<Task<u8>>, cx: &mut Context) -> Poll<()>,
@@ -39,7 +85,7 @@ impl SchedularVTable {
 
     unsafe fn drive<F: Future<Output = ()>>(ptr: NonNull<Task<u8>>, cx: &mut Context) -> Poll<()> {
         let ptr = ptr.cast::<Task<F>>();
-        Pin::new_unchecked(&mut (*ptr.as_ref().future.get())).poll(cx)
+        Pin::new_unchecked(&mut *(*ptr.as_ref().future.get())).poll(cx)
     }
 }
 
@@ -47,7 +93,37 @@ impl SchedularVTable {
 struct Task<F> {
     head: NodeHeader,
     body: TaskBody,
-    future: UnsafeCell<F>,
+    future: UnsafeCell<ManuallyDrop<F>>,
+}
+
+impl<F> Task<F>
+where
+    F: Future<Output = ()>,
+{
+    fn new(queue: Weak<Queue>, future: F) -> Self {
+        Task {
+            head: NodeHeader::new(),
+            body: TaskBody {
+                queue,
+                vtable: VTable::get::<F>(),
+                next: Cell::new(None),
+                prev: Cell::new(None),
+                queued: AtomicBool::new(true),
+                done: Cell::new(TaskState::Running),
+            },
+            future: UnsafeCell::new(ManuallyDrop::new(future)),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum TaskState {
+    // Task is still actively running,
+    Running,
+    // Task was cancelled but not yet freed from the list.
+    Cancelled,
+    // Task is done, and should be removed.
+    Done,
 }
 
 // Seperate struct to not have everything be repr(C)
@@ -57,9 +133,9 @@ struct TaskBody {
     // The double linked list of tasks.
     next: Cell<Option<NonNull<Task<u8>>>>,
     prev: Cell<Option<NonNull<Task<u8>>>>,
+    done: Cell<TaskState>,
     // wether the task is currently in the queue to be re-polled.
     queued: AtomicBool,
-    done: Cell<bool>,
 }
 
 pub struct Schedular {
@@ -98,19 +174,7 @@ impl Schedular {
 
         debug_assert_eq!(offset_of!(Task<F>, future), offset_of!(Task<u8>, future));
 
-        let task = Arc::new(Task {
-            head: NodeHeader::new(),
-            body: TaskBody {
-                queue,
-                vtable: VTable::get::<F>(),
-                next: Cell::new(None),
-                prev: Cell::new(None),
-                queued: AtomicBool::new(true),
-                done: Cell::new(false),
-            },
-            future: UnsafeCell::new(ManuallyDrop::new(f)),
-        });
-
+        let task = Arc::new(Task::new(queue, f));
         // One count for the all list and one for the should_poll list.
         let task = NonNull::new_unchecked(Arc::into_raw(task) as *mut Task<F>).cast::<Task<u8>>();
         Arc::increment_strong_count(task.as_ptr());
@@ -119,6 +183,33 @@ impl Schedular {
 
         Pin::new_unchecked(&*self.should_poll).push(task.cast());
         self.len.set(self.len.get() + 1);
+    }
+
+    /// # Safety
+    /// This function erases any lifetime associated with the future.
+    /// Caller must ensure that either the future completes or is dropped before the lifetime
+    pub unsafe fn push_cancellable<F>(&self, f: F) -> CancelToken
+    where
+        F: Future<Output = ()>,
+    {
+        let queue = Arc::downgrade(&self.should_poll);
+
+        debug_assert_eq!(offset_of!(Task<F>, future), offset_of!(Task<u8>, future));
+
+        let task = Arc::new(Task::new(queue, f));
+
+        // One count for the all list and one for the should_poll list and one for the cancel
+        // token.
+        let task = NonNull::new_unchecked(Arc::into_raw(task) as *mut Task<F>).cast::<Task<u8>>();
+        Arc::increment_strong_count(task.as_ptr());
+        Arc::increment_strong_count(task.as_ptr());
+
+        self.push_task_to_all(task);
+
+        Pin::new_unchecked(&*self.should_poll).push(task.cast());
+        self.len.set(self.len.get() + 1);
+
+        CancelToken(task)
     }
 
     unsafe fn push_task_to_all(&self, task: NonNull<Task<u8>>) {
@@ -135,7 +226,7 @@ impl Schedular {
 
     unsafe fn pop_task_all(&self, task: NonNull<Task<u8>>) {
         task.as_ref().body.queued.store(true, Ordering::Release);
-        task.as_ref().body.done.set(true);
+        task.as_ref().body.done.set(TaskState::Done);
 
         // detach the task from the all list
         if let Some(next) = task.as_ref().body.next.get() {
@@ -184,13 +275,13 @@ impl Schedular {
             // Popped a task, ownership taken from the que
             let cur = match Pin::new_unchecked(&*self.should_poll).pop() {
                 queue::Pop::Empty => {
-                    if self.is_empty() {
+                    return if self.is_empty() {
                         // No more tasks left, nothing to be done.
-                        return Poll::Ready(());
+                        Poll::Ready(())
                     } else {
                         // Tasks left but none ready, return ownership.
-                        return Poll::Pending;
-                    }
+                        Poll::Pending
+                    };
                 }
                 queue::Pop::Value(x) => x,
                 queue::Pop::Inconsistant => {
@@ -201,10 +292,17 @@ impl Schedular {
 
             let cur = cur.cast::<Task<u8>>();
 
-            if cur.as_ref().body.done.get() {
-                // Task was already done, we con drop the ownership we got from the que.
-                Self::drop_task(cur);
-                continue;
+            match cur.as_ref().body.done.get() {
+                TaskState::Cancelled => {
+                    self.pop_task_all(cur);
+                    continue;
+                }
+                TaskState::Done => {
+                    // Task was already done, we con drop the ownership we got from the que.
+                    Self::drop_task(cur);
+                    continue;
+                }
+                TaskState::Running => {}
             }
 
             let prev = cur.as_ref().body.queued.swap(false, Ordering::AcqRel);

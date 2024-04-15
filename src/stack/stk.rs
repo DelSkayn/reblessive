@@ -23,7 +23,7 @@ impl StackMarker for Stk {
 pub(crate) struct InnerStkFuture<'a, F, R, M> {
     // The function to execute to get the future
     pub(crate) f: Option<F>,
-    pub(crate) completed: bool,
+    pub(crate) running: bool,
     // The place where the future will store the result.
     pub(crate) res: UnsafeCell<Option<R>>,
     pub(crate) _marker: PhantomData<&'a mut M>,
@@ -39,27 +39,51 @@ where
 
     #[inline]
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // Pinning isn't structural for any of the fields.
+        // SAFETY: Pinning isn't structural for any of the fields.
         let this = unsafe { self.get_unchecked_mut() };
         unsafe {
             if let Some(x) = this.f.take() {
+                // Closure is still present, this is the first call try to spawn a new future on
+                // the stack.
                 with_stack_context(|stack| {
+                    // The state of the stack must be base, if not, a future has been spawned and
+                    // spawning another could result in unsound behaviour.
+                    assert_eq!(stack.get_state(), State::Base, "Tried to push a task while another stack future is running. Stack futures need be completed before another task can be ran.");
+
+                    // Create a pointer to the result place.
+                    // As this future is now pinned it cannot be moved until it is dropped so
+                    // handing this pointer to the stack is sound as long as we make sure the task
+                    // handling the pointer is dropped when this future is dropped.
                     let place = NonNull::from(&this.res);
                     let fut = (x)(M::create());
 
                     stack
                         .tasks
                         .push(async move { place.as_ref().get().write(Some(fut.await)) });
+
+                    // Set the state to new task, signifying that no new future can be pushed and
+                    // that we should yield back to stack executor.
                     stack.set_state(State::NewTask);
+                    // We are now running the future so if this future is dropped before completion
+                    // wwe also need to drop the task.
+                    this.running = true;
                 });
                 return Poll::Pending;
             }
 
+            // Executors could possibly poll this future again before it is actually completed
+            // This should only happend while still in NewTask state, as after new task state is
+            // cleared this future should not be ran again until its spawned task completed.
             if let Some(x) = (*this.res.get()).take() {
                 // Set the this pointer to null to signal the drop impl that we don't need to pop
                 // the task.
-                this.completed = true;
+                this.running = false;
                 return Poll::Ready(x);
+            } else {
+                #[cfg(debug_assertions)]
+                if this.running {
+                    with_stack_context(|stack| assert_eq!(stack.get_state(), State::NewTask))
+                }
             }
         }
         Poll::Pending
@@ -68,9 +92,9 @@ where
 
 impl<'a, F, R, M> Drop for InnerStkFuture<'a, F, R, M> {
     fn drop(&mut self) {
-        if self.f.is_none() && !self.completed && self.res.get_mut().is_none() {
-            // F is none so we did push a task but we didn't yet return the value and it also isn't
-            // in its place. Therefore the task is still on the stack and needs to be popped.
+        if self.running && self.res.get_mut().is_none() {
+            // the future is still in a running state and its result was not yet set.
+            // This means that the task is still present on the stack and therefore must be popped.
             with_stack_context(|stack| {
                 if stack.get_state() != State::Cancelled {
                     unsafe { stack.tasks().pop() };
@@ -123,6 +147,9 @@ impl Future for YieldFuture {
         with_stack_context(|stack| {
             if !*done {
                 *done = true;
+                // Set the state to yield. We must set this state because a Poll::Pending without
+                // an associated state change is interpreted as an external future returning
+                // pending so we need to yield back
                 stack.set_state(State::Yield);
                 return Poll::Pending;
             }
@@ -151,8 +178,33 @@ impl Stk {
     {
         StkFuture {
             inner: InnerStkFuture {
-                completed: false,
+                running: false,
                 f: Some(f),
+                res: UnsafeCell::new(None),
+                _marker: PhantomData,
+            },
+        }
+    }
+
+    /// A less save version of Stk::run which doesn't require passing arround a Stk object.
+    /// Invalid use of this function will cause a panic, deadlock or otherwise generally sound but
+    /// strange behaviour.
+    ///
+    ///
+    /// # Panic
+    /// This function will panic while not within a Stack
+    /// The future returned by this function will panic if another stack futures is created which
+    /// is not contained within the future returned by this function while the current future is
+    /// still running
+    pub fn enter_run<'a, F, Fut, R>(f: F) -> StkFuture<'a, F, R>
+    where
+        F: FnOnce(&'a mut Stk) -> Fut,
+        Fut: Future<Output = R> + 'a,
+    {
+        StkFuture {
+            inner: InnerStkFuture {
+                f: Some(f),
+                running: false,
                 res: UnsafeCell::new(None),
                 _marker: PhantomData,
             },

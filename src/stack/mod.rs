@@ -52,6 +52,20 @@ impl<'a, R> Future for FinishFuture<'a, R> {
                         let defer = Defer::new(tasks, |tasks| tasks.pop());
 
                         match task.drive(cx) {
+                            // What is happing in a task depends on both what it returns and the
+                            // state of the stack.
+                            // If a task returns Poll::ready it has completed, needs to be popped,
+                            // and the task before it must be executed again.
+                            // For pending it depends on the current state.
+                            // - NewTask: A future pushed a new task onto the stack and then
+                            // yielded back. This means we need to run the new task.
+                            // - Yield: A future requested that we yield back to the stack running.
+                            // - Cancelled: The current stack is being dropped, this should be
+                            // impossible while driving the future.
+                            // - Base: All reblessive futures change the stack state before
+                            // returning Poll::Pending. If no state change happend a non-reblessive
+                            // future must have returned Poll::pending, we therefore need to yield
+                            // back to a parent executor.
                             Poll::Pending => {
                                 defer.take();
                                 match self.runner.stack_state() {
@@ -111,11 +125,13 @@ impl<'a, 'b, R> Future for StepFuture<'a, 'b, R> {
                                 unreachable!("Stack being dropped while actively driven")
                             }
                             State::NewTask => {
+                                self.runner.ptr.set_state(State::Base);
                                 // Poll::Pending was returned and a new future was created, therefore
                                 // we need to continue evaluating tasks so return Poll::Ready
                                 Poll::Ready(None)
                             }
                             State::Yield => {
+                                self.runner.ptr.set_state(State::Base);
                                 // Poll::Pending was returned and with a request to interrupt execution
                                 // so return ready
                                 Poll::Ready(None)
@@ -185,7 +201,9 @@ impl<'a, R> Runner<'a, R> {
                                 State::Yield => {
                                     self.set_stack_state(State::Base);
                                 }
-                                State::Base => {}
+                                State::Base => panic!(
+                                    "Recieved a pending request from a non-reblessive future"
+                                ),
                                 State::NewTask => {
                                     self.set_stack_state(State::Base);
                                     break;
@@ -222,7 +240,9 @@ impl<'a, R> Runner<'a, R> {
 
                 match self.ptr.drive_head(&mut context) {
                     Poll::Pending => match self.stack_state() {
-                        State::Base => {}
+                        State::Base => {
+                            panic!("Recieved a pending request from a non-reblessive future")
+                        }
                         State::Yield | State::NewTask => {
                             self.set_stack_state(State::Base);
                         }
