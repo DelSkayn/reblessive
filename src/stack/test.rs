@@ -1,13 +1,4 @@
-use std::{
-    cell::Cell,
-    future::Future,
-    mem::MaybeUninit,
-    pin::Pin,
-    task::{Context, Poll},
-    time::Duration,
-};
-
-use tokio::pin;
+use std::{cell::Cell, future::Future, mem::MaybeUninit, pin::Pin, task::Poll, time::Duration};
 
 use crate::{
     defer::Defer,

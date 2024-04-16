@@ -1,5 +1,3 @@
-use pin_utils::{unsafe_pinned, unsafe_unpinned};
-
 use super::{schedular::CancelToken, with_tree_context, TreeStack};
 use crate::{
     stack::{
@@ -32,10 +30,6 @@ pub struct StkFuture<'a, F, R> {
     inner: InnerStkFuture<'a, F, R, Stk>,
 }
 
-impl<'a, F, R> StkFuture<'a, F, R> {
-    unsafe_pinned!(inner: InnerStkFuture<'a, F, R, Stk>);
-}
-
 impl<'a, F, Fut, R> Future for StkFuture<'a, F, R>
 where
     F: FnOnce(&'a mut Stk) -> Fut,
@@ -44,7 +38,8 @@ where
     type Output = R;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let inner = self.inner();
+        // Safety: Pinning is structural for inner
+        let inner = unsafe { self.map_unchecked_mut(|x| &mut x.inner) };
         inner.poll(cx)
     }
 }
@@ -189,11 +184,6 @@ impl<'a, R> Drop for ScopeStkFuture<'a, R> {
     fn drop(&mut self) {
         unsafe { std::mem::drop(Box::from_raw(self.place.as_ptr())) };
     }
-}
-
-impl<'a, R> ScopeStkFuture<'a, R> {
-    unsafe_unpinned!(stack: Stack);
-    unsafe_unpinned!(place: NonNull<UnsafeCell<Option<R>>>);
 }
 
 impl<'a, R> Future for ScopeStkFuture<'a, R> {

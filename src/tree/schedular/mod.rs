@@ -11,6 +11,7 @@ use std::{
     task::{Context, Poll},
 };
 
+mod atomic_waker;
 mod queue;
 mod waker;
 use queue::Queue;

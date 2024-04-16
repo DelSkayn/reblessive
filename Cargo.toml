@@ -9,10 +9,6 @@ description = "A small runtime for running deeply nested recursive functions"
 keywords = ["stack","call","async","memory","runtime"]
 repository = "https://github.com/DelSkayn/reblessive.git"
 
-[dependencies]
-atomic-waker = "1.1.2"
-pin-utils = "0.1.0"
-
 [dev-dependencies]
 futures-util = "0.3.30"
 pollster = "0.3.0"

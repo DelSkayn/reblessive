@@ -1,5 +1,3 @@
-use pin_utils::{unsafe_pinned, unsafe_unpinned};
-
 use crate::stack::{with_stack_context, Stack, State};
 use std::{
     cell::UnsafeCell,
@@ -112,10 +110,6 @@ pub struct StkFuture<'a, F, R> {
     inner: InnerStkFuture<'a, F, R, Stk>,
 }
 
-impl<'a, F, R> StkFuture<'a, F, R> {
-    unsafe_pinned!(inner: InnerStkFuture<'a, F, R, Stk>);
-}
-
 impl<'a, F, Fut, R> Future for StkFuture<'a, F, R>
 where
     F: FnOnce(&'a mut Stk) -> Fut,
@@ -124,7 +118,8 @@ where
     type Output = R;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let inner = self.inner();
+        // Safety: Pinning is structural for inner.
+        let inner = unsafe { self.map_unchecked_mut(|x| &mut x.inner) };
         inner.poll(cx)
     }
 }
@@ -135,18 +130,14 @@ pub struct YieldFuture {
     pub(crate) done: bool,
 }
 
-impl YieldFuture {
-    unsafe_unpinned!(done: bool);
-}
-
 impl Future for YieldFuture {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
-        let done = self.done();
+        let this = self.get_mut();
         with_stack_context(|stack| {
-            if !*done {
-                *done = true;
+            if !this.done {
+                this.done = true;
                 // Set the state to yield. We must set this state because a Poll::Pending without
                 // an associated state change is interpreted as an external future returning
                 // pending so we need to yield back
