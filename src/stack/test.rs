@@ -539,35 +539,45 @@ fn forget_runner_and_use_again() {
 }
 
 #[test]
-#[cfg_attr(miri, ignore)]
-#[should_panic]
-fn enter_after_enter() {
-    thread_local! {
-        static COUNTER: Cell<usize> = const{ Cell::new(0)};
-    }
-
+#[should_panic(expected = "Tried to push a task while another stack future is running")]
+fn enter_run_after_enter() {
     let mut stack = Stack::new();
 
     async fn inner(stk: &mut Stk) {
-        let first = stk.run(|stk| stk.yield_now());
+        let a = stk.run(|stk| stk.yield_now());
+        let b = Stk::enter_run(|stk| stk.yield_now());
 
-        let second = Stk::enter_run(|stk| stk.yield_now());
-
-        ManualPoll::wrap((first, second), |f, ctx| {
+        ManualPoll::wrap((a, b), |f, ctx| {
             let (a, b) = unsafe { f.get_unchecked_mut() };
 
             let _ = unsafe { Pin::new_unchecked(a) }.poll(ctx);
             let _ = unsafe { Pin::new_unchecked(b) }.poll(ctx);
-
-            Poll::Pending
+            panic!("didn't properly panic");
         })
         .await
     }
-
-    let runner = stack.enter(inner);
-    std::mem::forget(runner);
     stack.enter(inner).finish();
-    assert_eq!(COUNTER.get(), 2)
+}
+
+#[test]
+#[should_panic(expected = "Tried to push a task while another stack future is running")]
+fn enter_after_enter_run() {
+    let mut stack = Stack::new();
+
+    async fn inner(stk: &mut Stk) {
+        let a = stk.run(|stk| stk.yield_now());
+        let b = Stk::enter_run(|stk| stk.yield_now());
+
+        ManualPoll::wrap((a, b), |f, ctx| {
+            let (a, b) = unsafe { f.get_unchecked_mut() };
+
+            let _ = unsafe { Pin::new_unchecked(b) }.poll(ctx);
+            let _ = unsafe { Pin::new_unchecked(a) }.poll(ctx);
+            panic!("didn't properly panic");
+        })
+        .await
+    }
+    stack.enter(inner).finish();
 }
 
 #[test]
