@@ -36,7 +36,7 @@ where
     type Output = R;
 
     #[inline]
-    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // SAFETY: Pinning isn't structural for any of the fields.
         let this = unsafe { self.get_unchecked_mut() };
         unsafe {
@@ -55,9 +55,23 @@ where
                     let place = NonNull::from(&this.res);
                     let fut = (x)(M::create());
 
-                    stack
-                        .tasks
-                        .push(async move { place.as_ref().get().write(Some(fut.await)) });
+                    // If the context is not the one created at the root we have entered this
+                    // future from a different schedular, this means that this future might not
+                    // wake up when it needs to unless we wake the waker. However we don't always
+                    // wan't to clone and run the waker cause that has significant performance
+                    // impacts.
+                    if stack.is_root_context(cx) {
+                        stack.tasks.push(async move {
+                            place.as_ref().get().write(Some(fut.await));
+                        });
+                    } else {
+                        let waker = cx.waker().clone();
+
+                        stack.tasks.push(async move {
+                            place.as_ref().get().write(Some(fut.await));
+                            waker.wake()
+                        });
+                    }
 
                     // Set the state to new task, signifying that no new future can be pushed and
                     // that we should yield back to stack executor.

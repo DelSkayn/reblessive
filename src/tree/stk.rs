@@ -160,6 +160,7 @@ impl Stk {
         YieldFuture { done: false }
     }
 
+    /// Create a scope in which multiple reblessive futures can be polled at the same time.
     pub fn scope<'a, F, Fut, R>(&'a mut self, f: F) -> ScopeFuture<'a, F, R>
     where
         F: FnOnce(&'a ScopeStk) -> Fut,

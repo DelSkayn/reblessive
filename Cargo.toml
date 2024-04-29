@@ -10,6 +10,7 @@ keywords = ["stack","call","async","memory","runtime"]
 repository = "https://github.com/DelSkayn/reblessive.git"
 
 [dev-dependencies]
+criterion = "0.5.1"
 futures-util = "0.3.30"
 pollster = "0.3.0"
 tokio = { version = "1.36.0", features = ["full"] }
@@ -22,3 +23,7 @@ tree = []
 all-features = true
 # defines the configuration attribute `docsrs`
 rustdoc-args = ["--cfg", "docsrs"]
+
+[[bench]]
+name = "fibbo"
+harness = false

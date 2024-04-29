@@ -42,6 +42,10 @@ impl<'a, R> Future for FinishFuture<'a, R> {
         enter_stack_context(self.runner.ptr, || {
             unsafe {
                 let tasks = &self.runner.ptr.tasks;
+                let old_ctx = self.runner.ptr.set_context(NonNull::from(&*cx).cast());
+                let _defer_context = Defer::new(self.runner.ptr, |ptr| {
+                    ptr.set_context(old_ctx);
+                });
 
                 loop {
                     let Some(mut task) = tasks.last() else {
@@ -111,6 +115,10 @@ impl<'a, 'b, R> Future for StepFuture<'a, 'b, R> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         enter_stack_context(self.runner.ptr, || {
+            let old_ctx = self.runner.ptr.set_context(NonNull::from(&*cx).cast());
+            let _defer_context = Defer::new(self.runner.ptr, |ptr| {
+                ptr.set_context(old_ctx);
+            });
             unsafe {
                 match self.runner.ptr.drive_head(cx) {
                     Poll::Pending => {
@@ -188,6 +196,10 @@ impl<'a, R> Runner<'a, R> {
         enter_stack_context(self.ptr, || {
             let waker = stub_ctx::get();
             let mut context = Context::from_waker(&waker);
+            let old_ctx = self.ptr.set_context(NonNull::from(&context).cast());
+            let _defer_context = Defer::new(self.ptr, |ptr| {
+                ptr.set_context(old_ctx);
+            });
 
             while let Some(mut task) = self.ptr.tasks.last() {
                 loop {
@@ -237,6 +249,10 @@ impl<'a, R> Runner<'a, R> {
             unsafe {
                 let waker = stub_ctx::get();
                 let mut context = Context::from_waker(&waker);
+                let old_ctx = self.ptr.set_context(NonNull::from(&context).cast());
+                let _defer_context = Defer::new(self.ptr, |ptr| {
+                    ptr.set_context(old_ctx);
+                });
 
                 match self.ptr.drive_head(&mut context) {
                     Poll::Pending => match self.stack_state() {
@@ -338,6 +354,7 @@ where
 pub struct Stack {
     state: Cell<State>,
     tasks: StackTasks,
+    context: Cell<NonNull<()>>,
 }
 
 unsafe impl Send for Stack {}
@@ -351,6 +368,7 @@ impl Stack {
         Stack {
             state: Cell::new(State::Base),
             tasks: StackTasks::new(),
+            context: Cell::new(NonNull::dangling()),
         }
     }
 
@@ -360,6 +378,7 @@ impl Stack {
         Stack {
             state: Cell::new(State::Base),
             tasks: StackTasks::with_capacity(cap),
+            context: Cell::new(NonNull::dangling()),
         }
     }
 
@@ -421,6 +440,14 @@ impl Stack {
 
     pub(crate) fn set_state(&self, state: State) {
         self.state.set(state)
+    }
+
+    pub(crate) fn set_context(&self, cx: NonNull<()>) -> NonNull<()> {
+        self.context.replace(cx)
+    }
+
+    pub(crate) fn is_root_context(&self, ctx: &mut Context) -> bool {
+        self.context.get() == NonNull::from(ctx).cast()
     }
 
     pub(crate) fn clear(&self) {

@@ -5,12 +5,13 @@ use std::{
     task::{RawWaker, RawWakerVTable, Waker},
 };
 
-unsafe fn stub_clone(_: *const ()) -> RawWaker {
-    panic!("Called an non-reblessive async function withing a non-async reblessive context");
+unsafe fn stub_clone(data: *const ()) -> RawWaker {
+    //panic!("Called an non-reblessive async function withing a non-async reblessive context");
+    RawWaker::new(data, &STUB_WAKER_V_TABLE)
 }
 
 unsafe fn stub_wake(_: *const ()) {
-    panic!("Called an non-reblessive async function withing a non-async reblessive context");
+    //panic!("Called an non-reblessive async function withing a non-async reblessive context");
 }
 
 unsafe fn stub_drop(_: *const ()) {}

@@ -1,5 +1,6 @@
 pub use crate::stack::YieldFuture;
 use crate::{
+    defer::Defer,
     stack::{enter_stack_context, State},
     Stack,
 };
@@ -32,19 +33,24 @@ impl<'a, R> Future for FinishFuture<'a, R> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         enter_stack_context(&self.runner.ptr.root, || {
+            let ptr = self.runner.ptr.root.set_context(NonNull::from(&*cx).cast());
+            let defer = Defer::new(self.runner.ptr, |schedular| {
+                schedular.root.set_context(ptr);
+            });
+
             enter_tree_context(&self.runner.ptr.fanout, || {
                 loop {
                     // First we need finish all fanout futures.
-                    while !self.runner.ptr.fanout.is_empty() {
-                        if unsafe { self.runner.ptr.fanout.poll(cx) }.is_pending() {
+                    while !defer.fanout.is_empty() {
+                        if unsafe { defer.fanout.poll(cx) }.is_pending() {
                             return Poll::Pending;
                         }
                     }
 
                     // No futures left in fanout, run on the root stack.
-                    match self.runner.ptr.root.drive_head(cx) {
+                    match defer.root.drive_head(cx) {
                         Poll::Ready(_) => {
-                            if self.runner.ptr.root.tasks().is_empty() {
+                            if defer.root.tasks().is_empty() {
                                 unsafe {
                                     return Poll::Ready(
                                         (*self.runner.place.as_ref().get()).take().unwrap(),
@@ -52,15 +58,15 @@ impl<'a, R> Future for FinishFuture<'a, R> {
                                 }
                             }
                         }
-                        Poll::Pending => match self.runner.ptr.root.get_state() {
+                        Poll::Pending => match defer.root.get_state() {
                             State::Base => {
-                                if self.runner.ptr.fanout.is_empty() {
+                                if defer.fanout.is_empty() {
                                     return Poll::Pending;
                                 }
                             }
                             State::Cancelled => unreachable!("TreeStack dropped while stepping"),
                             State::NewTask | State::Yield => {
-                                self.runner.ptr.root.set_state(State::Base);
+                                defer.root.set_state(State::Base);
                             }
                         },
                     }
@@ -80,17 +86,22 @@ impl<'a, 'b, R> Future for StepFuture<'a, 'b, R> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         enter_stack_context(&self.runner.ptr.root, || {
-            enter_tree_context(&self.runner.ptr.fanout, || {
-                if !self.runner.ptr.fanout.is_empty() {
-                    if unsafe { self.runner.ptr.fanout.poll(cx) }.is_pending() {
+            let ptr = self.runner.ptr.root.set_context(NonNull::from(&*cx).cast());
+            let defer = Defer::new(self.runner.ptr, |schedular| {
+                schedular.root.set_context(ptr);
+            });
+
+            enter_tree_context(&defer.fanout, || {
+                if !defer.fanout.is_empty() {
+                    if unsafe { defer.fanout.poll(cx) }.is_pending() {
                         return Poll::Pending;
                     }
                 }
 
                 // No futures left in fanout, run on the root stack.l
-                match self.runner.ptr.root.drive_head(cx) {
+                match defer.root.drive_head(cx) {
                     Poll::Ready(_) => {
-                        if self.runner.ptr.root.tasks().is_empty() {
+                        if defer.root.tasks().is_empty() {
                             unsafe {
                                 return Poll::Ready(Some(
                                     (*self.runner.place.as_ref().get()).take().unwrap(),
@@ -98,9 +109,9 @@ impl<'a, 'b, R> Future for StepFuture<'a, 'b, R> {
                             }
                         }
                     }
-                    Poll::Pending => match self.runner.ptr.root.get_state() {
+                    Poll::Pending => match defer.root.get_state() {
                         State::Base => {
-                            if self.runner.ptr.fanout.is_empty() {
+                            if defer.fanout.is_empty() {
                                 return Poll::Pending;
                             } else {
                                 return Poll::Ready(None);
@@ -108,7 +119,7 @@ impl<'a, 'b, R> Future for StepFuture<'a, 'b, R> {
                         }
                         State::Cancelled => unreachable!("TreeStack dropped while stepping"),
                         State::NewTask | State::Yield => {
-                            self.runner.ptr.root.set_state(State::Base);
+                            defer.root.set_state(State::Base);
                         }
                     },
                 }
