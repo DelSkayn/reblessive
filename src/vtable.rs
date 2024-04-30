@@ -6,9 +6,6 @@ use std::{
     task::{Context, Poll},
 };
 
-#[cfg(feature = "tree")]
-use crate::tree;
-
 /// A constant table generated for each type of tasks that is spawned.
 #[derive(Debug, Clone)]
 pub(crate) struct VTable {
@@ -18,9 +15,6 @@ pub(crate) struct VTable {
     pub(crate) driver: unsafe fn(NonNull<u8>, ctx: &mut Context<'_>) -> Poll<()>,
     /// The layout of the future.
     pub(crate) layout: Layout,
-    #[cfg(feature = "tree")]
-    /// The layout of the future when inside the schedular::Task  struct.
-    pub(crate) tree: tree::SchedularVTable,
 }
 
 impl VTable {
@@ -34,8 +28,6 @@ impl VTable {
                 dropper: VTable::drop_impl::<F>,
                 driver: VTable::drive_impl::<F>,
                 layout: Layout::new::<F>(),
-                #[cfg(feature = "tree")]
-                tree: tree::SchedularVTable::get::<F>(),
             };
         }
 

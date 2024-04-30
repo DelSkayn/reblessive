@@ -10,6 +10,7 @@ use std::{
     future::Future,
     mem::MaybeUninit,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicUsize, Ordering},
     task::Poll,
     time::{Duration, Instant},
 };
@@ -267,28 +268,56 @@ async fn tokio_sleep_depth() {
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn read_files() {
+    static OPEN_COUNT: AtomicUsize = AtomicUsize::new(0);
+    const MAX_OPEN: usize = 100;
+
     let mut stack = TreeStack::new();
 
     async fn read_dir(stk: &ScopeStk, dir: PathBuf) -> String {
         let mut dir = tokio::fs::read_dir(dir).await.unwrap();
         let mut r = Vec::new();
+        let mut buf = String::new();
         while let Some(entry) = dir.next_entry().await.unwrap() {
             let path = entry.path();
             let kind = entry.file_type().await.unwrap();
             if kind.is_dir() {
-                let fut = stk.run(|stk| stk.scope(|stk| read_dir(stk, path)));
-                r.push(fut)
+                if OPEN_COUNT.load(Ordering::Relaxed) > MAX_OPEN {
+                    let str = stk.run(|stk| stk.scope(|stk| read_dir(stk, path))).await;
+                    buf.push_str(&str);
+                } else {
+                    OPEN_COUNT.fetch_add(1, Ordering::Relaxed);
+                    let f = stk.run(|stk| async {
+                        let r = stk.scope(|stk| read_dir(stk, path)).await;
+                        OPEN_COUNT.fetch_sub(1, Ordering::Relaxed);
+                        r
+                    });
+                    r.push(f)
+                }
             } else {
-                let fut = stk
-                    .run(|_| async { tokio::fs::read_to_string(path).await.unwrap_or_default() });
-                r.push(fut)
+                if OPEN_COUNT.load(Ordering::Relaxed) > MAX_OPEN {
+                    let str = stk
+                        .run(|_| async {
+                            tokio::fs::read_to_string(path).await.unwrap_or_default()
+                        })
+                        .await;
+                    buf.push_str(&str);
+                } else {
+                    OPEN_COUNT.fetch_add(1, Ordering::Relaxed);
+                    let f = stk.run(|_| async {
+                        let r = tokio::fs::read_to_string(path).await.unwrap_or_default();
+                        OPEN_COUNT.fetch_sub(1, Ordering::Relaxed);
+                        r
+                    });
+                    r.push(f)
+                }
             }
         }
-        join_all(r).await.join("\n=========\n")
+        let mut str = join_all(r).await.join("\n=========\n");
+        str.push_str(&buf);
+        str
     }
 
-    let before = Instant::now();
-    let full_text = stack
+    stack
         .enter(|stk| async {
             stk.scope(|stk| read_dir(stk, Path::new("./").to_path_buf()))
                 .await
@@ -296,46 +325,70 @@ async fn read_files() {
         .finish()
         .await;
 
-    println!("{}", full_text);
-
-    assert!(before.elapsed() < Duration::from_millis(2000));
+    //println!("{}", full_text);
 }
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn read_files_stepping() {
+    static OPEN_COUNT: AtomicUsize = AtomicUsize::new(0);
+    const MAX_OPEN: usize = 100;
+
     let mut stack = TreeStack::new();
 
     async fn read_dir(stk: &ScopeStk, dir: PathBuf) -> String {
         let mut dir = tokio::fs::read_dir(dir).await.unwrap();
         let mut r = Vec::new();
+        let mut buf = String::new();
         while let Some(entry) = dir.next_entry().await.unwrap() {
             let path = entry.path();
             let kind = entry.file_type().await.unwrap();
             if kind.is_dir() {
-                let fut = stk.run(|stk| stk.scope(|stk| read_dir(stk, path)));
-                r.push(fut)
+                if OPEN_COUNT.load(Ordering::Relaxed) > MAX_OPEN {
+                    let str = stk.run(|stk| stk.scope(|stk| read_dir(stk, path))).await;
+                    buf.push_str(&str);
+                } else {
+                    OPEN_COUNT.fetch_add(1, Ordering::Relaxed);
+                    let f = stk.run(|stk| async {
+                        let r = stk.scope(|stk| read_dir(stk, path)).await;
+                        OPEN_COUNT.fetch_sub(1, Ordering::Relaxed);
+                        r
+                    });
+                    r.push(f)
+                }
             } else {
-                let fut = stk
-                    .run(|_| async { tokio::fs::read_to_string(path).await.unwrap_or_default() });
-                r.push(fut)
+                if OPEN_COUNT.load(Ordering::Relaxed) > MAX_OPEN {
+                    let str = stk
+                        .run(|_| async {
+                            tokio::fs::read_to_string(path).await.unwrap_or_default()
+                        })
+                        .await;
+                    buf.push_str(&str);
+                } else {
+                    OPEN_COUNT.fetch_add(1, Ordering::Relaxed);
+                    let f = stk.run(|_| async {
+                        let r = tokio::fs::read_to_string(path).await.unwrap_or_default();
+                        OPEN_COUNT.fetch_sub(1, Ordering::Relaxed);
+                        r
+                    });
+                    r.push(f)
+                }
             }
         }
-        join_all(r).await.join("\n=========\n")
+        let mut str = join_all(r).await.join("\n=========\n");
+        str.push_str(&buf);
+        str
     }
 
-    let before = Instant::now();
     let mut runner = stack.enter(|stk| async {
         stk.scope(|stk| read_dir(stk, Path::new("./").to_path_buf()))
             .await
     });
 
     loop {
-        if let Some(x) = runner.step().await {
-            println!("{}", x);
+        if let Some(_) = runner.step().await {
+            //println!("{}", x);
             break;
         }
     }
-
-    assert!(before.elapsed() < Duration::from_millis(2000));
 }

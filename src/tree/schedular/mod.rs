@@ -1,7 +1,7 @@
 use std::{
     cell::{Cell, UnsafeCell},
     future::Future,
-    mem::{offset_of, ManuallyDrop},
+    mem::ManuallyDrop,
     pin::Pin,
     ptr::NonNull,
     sync::{
@@ -16,7 +16,7 @@ mod queue;
 mod waker;
 use queue::Queue;
 
-use crate::{defer::Defer, vtable::VTable};
+use crate::defer::Defer;
 
 use self::queue::NodeHeader;
 
@@ -26,7 +26,7 @@ impl CancelToken {
     pub fn detach(self) {
         // properly drop the pointer,
         // Safety: Below self is forgotten, so it won't be dropped twice.
-        unsafe { Schedular::drop_task(self.0) };
+        unsafe { Schedular::decr_task(self.0) };
         // forget so the drop impl wont run.
         std::mem::forget(self);
     }
@@ -35,53 +35,79 @@ impl CancelToken {
 impl Drop for CancelToken {
     fn drop(&mut self) {
         let rf = unsafe { self.0.as_ref() };
-        // Set queued to prefend it from
+
+        // use a defer so that a possible panic in the waker will still decrement the arc count.
+        let _defer = Defer::new(self.0, |this| unsafe { Schedular::decr_task(*this) });
+
         if matches!(rf.body.done.get(), TaskState::Cancelled | TaskState::Done) {
-            // Safety: weak only dropped hear and when detached, in which case this won't run so this is sound.
-            unsafe { Schedular::drop_task(self.0) };
+            // the task was already done or cancelled, so the future was already dropped and only
+            // arc count needs to be decremented.
             return;
         }
 
+        // after we have cancelled the task we can drop the future since it will no longer be
+        // dropped by the main schedular.
         rf.body.done.set(TaskState::Cancelled);
+        unsafe { Schedular::drop_task(self.0) };
 
+        // Try to schedule the task if it wasn't already so it can be removed from the all task
+        // list.
         if rf
             .body
             .queued
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
-            // Task wasn't scheduled yet, add it so it can be remove from the list.
-            // If the queue was already dropped the task will be cancelled already.
             if let Some(queue) = rf.body.queue.upgrade() {
                 unsafe {
-                    Pin::new_unchecked(&*queue).push(self.0.cast());
                     queue.waker().wake();
+                    Pin::new_unchecked(&*queue).push(self.0.cast());
                 }
-                // we transfered the ownership to the queue, so we dont need to run drop.
+                // we transfered the ownership to the queue, so we dont need to decrement the arc
+                // count.
+                _defer.take();
                 return;
             }
         }
-        // Safety: weak only dropped hear and when detached, in which case this won't run so this is sound.
-        unsafe { Schedular::drop_task(self.0) };
     }
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct SchedularVTable {
+pub(crate) struct VTable {
+    task_incr: unsafe fn(NonNull<Task<u8>>),
+    task_decr: unsafe fn(NonNull<Task<u8>>),
     task_drive: unsafe fn(NonNull<Task<u8>>, cx: &mut Context) -> Poll<()>,
     task_drop: unsafe fn(NonNull<Task<u8>>),
 }
 
-impl SchedularVTable {
-    pub const fn get<F: Future<Output = ()>>() -> SchedularVTable {
-        SchedularVTable {
-            task_drop: Self::drop::<F>,
-            task_drive: Self::drive::<F>,
+impl VTable {
+    pub const fn get<F: Future<Output = ()>>() -> &'static VTable {
+        trait HasVTable {
+            const V_TABLE: VTable;
         }
+
+        impl<F: Future<Output = ()>> HasVTable for F {
+            const V_TABLE: VTable = VTable {
+                task_incr: VTable::incr::<F>,
+                task_decr: VTable::decr::<F>,
+                task_drop: VTable::drop::<F>,
+                task_drive: VTable::drive::<F>,
+            };
+        }
+
+        &<F as HasVTable>::V_TABLE
+    }
+
+    unsafe fn decr<F: Future<Output = ()>>(ptr: NonNull<Task<u8>>) {
+        Arc::decrement_strong_count(ptr.cast::<Task<F>>().as_ptr())
+    }
+
+    unsafe fn incr<F: Future<Output = ()>>(ptr: NonNull<Task<u8>>) {
+        Arc::increment_strong_count(ptr.cast::<Task<F>>().as_ptr())
     }
 
     unsafe fn drop<F: Future<Output = ()>>(ptr: NonNull<Task<u8>>) {
-        Arc::decrement_strong_count(ptr.cast::<Task<F>>().as_ptr())
+        ManuallyDrop::drop(&mut (*ptr.as_ref().future.get()))
     }
 
     unsafe fn drive<F: Future<Output = ()>>(ptr: NonNull<Task<u8>>, cx: &mut Context) -> Poll<()> {
@@ -173,12 +199,11 @@ impl Schedular {
     {
         let queue = Arc::downgrade(&self.should_poll);
 
-        debug_assert_eq!(offset_of!(Task<F>, future), offset_of!(Task<u8>, future));
-
         let task = Arc::new(Task::new(queue, f));
         // One count for the all list and one for the should_poll list.
-        let task = NonNull::new_unchecked(Arc::into_raw(task) as *mut Task<F>).cast::<Task<u8>>();
+        let task = NonNull::new_unchecked(Arc::into_raw(task) as *mut Task<F>);
         Arc::increment_strong_count(task.as_ptr());
+        let task = task.cast::<Task<u8>>();
 
         self.push_task_to_all(task);
 
@@ -195,15 +220,14 @@ impl Schedular {
     {
         let queue = Arc::downgrade(&self.should_poll);
 
-        debug_assert_eq!(offset_of!(Task<F>, future), offset_of!(Task<u8>, future));
-
         let task = Arc::new(Task::new(queue, f));
 
         // One count for the all list and one for the should_poll list and one for the cancel
         // token.
-        let task = NonNull::new_unchecked(Arc::into_raw(task) as *mut Task<F>).cast::<Task<u8>>();
+        let task = NonNull::new_unchecked(Arc::into_raw(task) as *mut Task<F>);
         Arc::increment_strong_count(task.as_ptr());
         Arc::increment_strong_count(task.as_ptr());
+        let task = task.cast::<Task<u8>>();
 
         self.push_task_to_all(task);
 
@@ -213,6 +237,8 @@ impl Schedular {
         CancelToken(task)
     }
 
+    /// Add a task to the all tasks list.
+    /// Assumes ownership of a count in the task arc count.
     unsafe fn push_task_to_all(&self, task: NonNull<Task<u8>>) {
         task.as_ref().body.next.set(self.all_next.get());
 
@@ -227,7 +253,10 @@ impl Schedular {
 
     unsafe fn pop_task_all(&self, task: NonNull<Task<u8>>) {
         task.as_ref().body.queued.store(true, Ordering::Release);
-        task.as_ref().body.done.set(TaskState::Done);
+
+        if let TaskState::Running = task.as_ref().body.done.replace(TaskState::Done) {
+            Self::drop_task(task)
+        }
 
         // detach the task from the all list
         if let Some(next) = task.as_ref().body.next.get() {
@@ -243,24 +272,34 @@ impl Schedular {
 
         // drop the ownership of the all list,
         // Task is now dropped or only owned by wakers or
-        Self::drop_task(task);
+        Self::decr_task(task);
         self.len.set(self.len.get() - 1);
     }
 
     unsafe fn drop_task(ptr: NonNull<Task<u8>>) {
-        (ptr.as_ref().body.vtable.tree.task_drop)(ptr)
+        (ptr.as_ref().body.vtable.task_drop)(ptr)
+    }
+
+    unsafe fn incr_task(ptr: NonNull<Task<u8>>) {
+        (ptr.as_ref().body.vtable.task_incr)(ptr)
+    }
+
+    unsafe fn decr_task(ptr: NonNull<Task<u8>>) {
+        (ptr.as_ref().body.vtable.task_decr)(ptr)
     }
 
     unsafe fn drive_task(ptr: NonNull<Task<u8>>, ctx: &mut Context) -> Poll<()> {
-        (ptr.as_ref().body.vtable.tree.task_drive)(ptr, ctx)
+        (ptr.as_ref().body.vtable.task_drive)(ptr, ctx)
     }
 
     pub unsafe fn poll(&self, cx: &mut Context) -> Poll<()> {
-        // During polling ownership is upheld by making sure arc counts are properly tranfered.
-        // Both ques, should_poll and all, have ownership of the arc count.
-        // Whenever a task is pushed onto the should_poll queue ownership is transfered.
-        // During task pusing into the schedular ownership of the count was transfered into the all
-        // list.
+        // Task are wrapped in an arc which is 'owned' by a number of possible structures.
+        // - The all task list
+        // - One or multiple wakers
+        // - A possible cancellation token
+        // - The should_poll list if it is scheduled.
+        //
+        // The implementations needs to ensure that the arc count stays consistent manually.
 
         if self.is_empty() {
             // No tasks, nothing to be done.
@@ -273,7 +312,7 @@ impl Schedular {
         let mut yielded = 0;
 
         loop {
-            // Popped a task, ownership taken from the que
+            // Popped a task, we now have the count that the should_poll list had.
             let cur = match Pin::new_unchecked(&*self.should_poll).pop() {
                 queue::Pop::Empty => {
                     return if self.is_empty() {
@@ -295,24 +334,27 @@ impl Schedular {
 
             match cur.as_ref().body.done.get() {
                 TaskState::Cancelled => {
+                    // Task was already cancelled, we just need to remove it from the all task
+                    // list.
                     self.pop_task_all(cur);
                     continue;
                 }
                 TaskState::Done => {
-                    // Task was already done, we con drop the ownership we got from the que.
-                    Self::drop_task(cur);
+                    // Task was already done, we can drop the ownership we got from the queue.
+                    Self::decr_task(cur);
                     continue;
                 }
                 TaskState::Running => {}
             }
 
+            // set queued back to false so the future can be rescheduled immediatly if desired.
             let prev = cur.as_ref().body.queued.swap(false, Ordering::AcqRel);
             assert!(prev);
 
-            // ownership transfered into the waker, which won't drop until the iteration completes.
+            // We now transfered the arc count from the queue into the waker which will decrement the count when dropped.
             let waker = waker::get(cur);
-            // if drive_task panics we still want to remove the task from the list.
-            // So handle it with a drop
+            // if drive_task panics we want to remove the task from the list.
+            // So we handle it with a drop implementation.
             let remove = Defer::new(self, |this| (*this).pop_task_all(cur));
             let mut ctx = Context::from_waker(&waker);
 
@@ -323,8 +365,11 @@ impl Schedular {
                     // Nothing todo the defer will remove the task from the list.
                 }
                 Poll::Pending => {
-                    // don't remove task from the list.
+                    // Future is still pending so prefent the defer drop from running.
                     remove.take();
+
+                    // check if we should yield back to the parent schedular because a future
+                    // requires it.
                     yielded += cur.as_ref().body.queued.load(Ordering::Relaxed) as usize;
                     if yielded > 2 || iteration > self.len.get() {
                         cx.waker().wake_by_ref();
@@ -337,14 +382,16 @@ impl Schedular {
 
     pub fn clear(&self) {
         // Clear all pending futures from the all list
-        let mut cur = self.all_next.get();
-        while let Some(c) = cur {
+        while let Some(c) = self.all_next.get() {
             unsafe {
-                cur = c.as_ref().body.next.get();
+                // remove it from the all list.
                 self.pop_task_all(c)
             }
         }
 
+        // Clear the should_poll list.
+        // No more futures should be allowed to be scheduled at this point because all of there
+        // queued flag has been set.
         loop {
             let cur = match unsafe { Pin::new_unchecked(&*self.should_poll).pop() } {
                 queue::Pop::Empty => break,
@@ -355,7 +402,8 @@ impl Schedular {
                 }
             };
 
-            unsafe { Self::drop_task(cur.cast()) };
+            // Task was alread dropped so just decrement its count.
+            unsafe { Self::decr_task(cur.cast()) };
         }
     }
 }

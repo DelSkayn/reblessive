@@ -15,7 +15,6 @@ use std::{
 
 mod schedular;
 use schedular::Schedular;
-pub(crate) use schedular::SchedularVTable;
 
 mod stk;
 pub use stk::{ScopeFuture, Stk, StkFuture};
