@@ -11,6 +11,8 @@ repository = "https://github.com/DelSkayn/reblessive.git"
 
 [dev-dependencies]
 criterion = "0.5.1"
+ciborium = "0.2.2"
+regex = "1.5.3"
 futures-util = "0.3.30"
 pollster = "0.3.0"
 tokio = { version = "1.36.0", features = ["full"] }
