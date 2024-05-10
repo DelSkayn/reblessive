@@ -12,7 +12,7 @@ overflow the stack, regardless of depth.
 ## What is this crate for?
 
 There are some types of algorithms which are easiest to write as a recursive algorithm. 
-Examples include a recursive decent parsers and tree-walking interpreters. 
+Examples include a recursive descent parsers and tree-walking interpreters. 
 These algorithms often need to keep track of complex stack of state and are therefore easiest to write as a set of recursive function calling each other.
 This does however have a major downside: The stack can be rather limited.
 Especially when the input of a algorithm is externally controlled, implementing it as a recursive algorithm is asking for stack overflows. 
