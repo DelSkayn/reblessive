@@ -82,7 +82,7 @@ jobs:
       - name: cargo update -Zminimal-versions
         run: cargo +nightly update -Zminimal-versions
       - name: cargo test
-        run: cargo test --locked --all-features tree --all-targets
+        run: cargo test --locked --features tree --all-targets
   os-check:
     # run cargo test on mac and windows
     runs-on: ${{ matrix.os }}
