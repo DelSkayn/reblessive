@@ -29,20 +29,6 @@ impl<T> Clone for Owned<T> {
 }
 
 impl<T> Owned<T> {
-    pub fn into_ref<'a>(self) -> Ref<'a, T> {
-        Ref {
-            ptr: self.ptr,
-            _marker: PhantomData,
-        }
-    }
-
-    pub fn into_mut<'a>(self) -> Mut<'a, T> {
-        Mut {
-            ptr: self.ptr,
-            _marker: PhantomData,
-        }
-    }
-
     pub unsafe fn write(&self, v: T) {
         self.ptr.as_ptr().write(v);
     }
@@ -68,116 +54,6 @@ impl<T> From<&T> for Owned<T> {
 impl<T> From<&mut T> for Owned<T> {
     fn from(value: &mut T) -> Self {
         Owned {
-            ptr: NonNull::from(value),
-            _marker: PhantomData,
-        }
-    }
-}
-
-pub struct Ref<'a, T> {
-    ptr: NonNull<T>,
-    _marker: PhantomData<&'a T>,
-}
-
-impl<T> Copy for Ref<'_, T> {}
-impl<T> Clone for Ref<'_, T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<'a, T> Ref<'a, T> {
-    pub fn into_owned(self) -> Owned<T> {
-        Owned {
-            ptr: self.ptr,
-            _marker: PhantomData,
-        }
-    }
-
-    pub unsafe fn read(&self) -> T {
-        self.ptr.as_ptr().read()
-    }
-}
-
-impl<'a, T> From<&'a T> for Ref<'a, T> {
-    fn from(value: &'a T) -> Self {
-        Ref {
-            ptr: NonNull::from(value),
-            _marker: PhantomData,
-        }
-    }
-}
-
-impl<'a, T> From<&'a mut T> for Ref<'a, T> {
-    fn from(value: &'a mut T) -> Self {
-        Ref {
-            ptr: NonNull::from(value),
-            _marker: PhantomData,
-        }
-    }
-}
-
-impl<'a, T> From<Mut<'a, T>> for Ref<'a, T> {
-    fn from(value: Mut<'a, T>) -> Self {
-        Ref {
-            ptr: value.ptr,
-            _marker: PhantomData,
-        }
-    }
-}
-
-pub struct Mut<'a, T> {
-    ptr: NonNull<T>,
-    _marker: PhantomData<&'a mut T>,
-}
-
-impl<T> Clone for Mut<'_, T> {
-    fn clone(&self) -> Self {
-        Self {
-            ptr: self.ptr,
-            _marker: PhantomData,
-        }
-    }
-}
-
-impl<'a, T> Mut<'a, T> {
-    pub unsafe fn write(&self, t: T) {
-        self.ptr.as_ptr().write(t)
-    }
-
-    pub unsafe fn read(&self) -> T {
-        self.ptr.as_ptr().read()
-    }
-
-    pub unsafe fn replace(&self, v: T) -> T {
-        std::ptr::replace(self.as_ptr(), v)
-    }
-
-    pub fn into_owned(self) -> Owned<T> {
-        Owned {
-            ptr: self.ptr,
-            _marker: PhantomData,
-        }
-    }
-
-    pub fn into_ref(self) -> Ref<'a, T> {
-        Ref {
-            ptr: self.ptr,
-            _marker: PhantomData,
-        }
-    }
-
-    pub fn reborrow<'b>(&mut self) -> Mut<'b, T> {
-        Mut {
-            ptr: self.ptr,
-            _marker: PhantomData,
-        }
-    }
-}
-
-impl<'a, T> From<&'a mut T> for Mut<'a, T> {
-    fn from(value: &'a mut T) -> Self {
-        Mut {
             ptr: NonNull::from(value),
             _marker: PhantomData,
         }
@@ -224,12 +100,6 @@ macro_rules! impl_base_methods {
                 }
             }
 
-            pub fn from_nonnull(ptr: NonNull<$gen>) -> Self {
-                Self {
-                    ptr,
-                    _marker: PhantomData,
-                }
-            }
 
             pub fn from_ptr(ptr: *mut $gen) -> Option<Self> {
                 NonNull::new(ptr).map(|x| Self {
@@ -245,27 +115,15 @@ macro_rules! impl_base_methods {
                 }
             }
 
-            pub fn into_ptr(self) -> *mut $gen {
-                self.ptr.as_ptr()
-            }
-
             pub fn as_ptr(&self) -> *mut $gen {
                 self.ptr.as_ptr()
             }
 
-            pub fn into_nonnull(self) -> NonNull<$gen> {
-                self.ptr
-            }
-
-            pub fn as_nonnull(&self) -> NonNull<$gen> {
-                self.ptr
-            }
-
-            pub unsafe fn as_ref(&self) -> &$($lt)? $gen {
+            pub unsafe fn as_ref<'a>(self) -> &'a $($lt)? $gen {
                 self.ptr.as_ref()
             }
 
-            pub unsafe fn as_mut(&mut self) -> &$($lt)? mut $gen {
+            pub unsafe fn as_mut<'a>(mut self) -> &'a $($lt)? mut $gen {
                 self.ptr.as_mut()
             }
 
@@ -275,10 +133,6 @@ macro_rules! impl_base_methods {
 
             pub unsafe fn sub(self, offset: usize) -> Self{
                 self.map_addr(|x| NonZeroUsize::new_unchecked(x.get() - offset))
-            }
-
-            pub unsafe fn offset(self, offset: isize) -> Self{
-                self.map_addr(|x| NonZeroUsize::new_unchecked((x.get() as isize + offset) as usize))
             }
 
             pub unsafe fn offset_from(self, other: $ty<$gen>) -> isize{
@@ -338,17 +192,6 @@ macro_rules! impl_base_methods {
                 }
             }
 
-            pub fn with_addr(self, addr: NonZeroUsize) -> Self{
-                #[cfg(feature = "nightly")]
-                {
-                    unsafe{ Self::from_ptr_unchecked(self.ptr.as_ptr().with_addr(addr.get())) }
-                }
-                #[cfg(not(feature = "nightly"))]
-                {
-                    unsafe{ Self::from_ptr_unchecked(addr.get() as *mut $gen) }
-                }
-            }
-
             pub fn map_addr<F>(self, f: F) -> Self
             where F: FnOnce(NonZeroUsize) -> NonZeroUsize
             {
@@ -385,6 +228,4 @@ macro_rules! impl_base_methods {
     };
 }
 
-impl_base_methods!(Ref<'a, T>);
-impl_base_methods!(Mut<'a, T>);
 impl_base_methods!(Owned<T>);

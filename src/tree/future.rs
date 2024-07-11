@@ -1,6 +1,6 @@
 use super::{schedular::CancelToken, stk::ScopeStk, Stk};
 use crate::{
-    ptr::{map_ptr, Mut, Owned},
+    ptr::{map_ptr, Owned},
     stack::{future::InnerStkFuture, StackState},
     Stack, TreeStack,
 };
@@ -69,11 +69,10 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         unsafe {
-            let mut this = Mut::from(self.get_unchecked_mut());
+            let this = Owned::from(self.get_unchecked_mut());
             match this.as_ref().state {
                 ScopeFutureState::Initial(_) => {
                     let ScopeFutureState::Initial(x) = this
-                        .reborrow()
                         .map_ptr(map_ptr!(Self, state))
                         .replace(ScopeFutureState::Running(Cell::new(None), Cell::new(None)))
                     else {
@@ -120,7 +119,7 @@ where
                     }
                     Poll::Pending
                 }
-                ScopeFutureState::Finished => return Poll::Pending,
+                ScopeFutureState::Finished => Poll::Pending,
             }
         }
     }
@@ -128,13 +127,10 @@ where
 
 impl<F, R> Drop for ScopeFuture<'_, F, R> {
     fn drop(&mut self) {
-        match self.state {
-            ScopeFutureState::Running(_, ref mut c) => {
-                // drop the cancellation so that the future won't run anymore.
-                // Manually dropped first so that the future is always dropped before the place is.
-                std::mem::drop(c.take());
-            }
-            _ => {}
+        if let ScopeFutureState::Running(_, ref mut c) = self.state {
+            // drop the cancellation so that the future won't run anymore.
+            // Manually dropped first so that the future is always dropped before the place is.
+            std::mem::drop(c.take());
         }
     }
 }

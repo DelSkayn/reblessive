@@ -28,6 +28,9 @@ pub struct Queue {
     stub: NodeHeader,
 }
 
+unsafe impl Send for Queue {}
+unsafe impl Sync for Queue {}
+
 pub enum Pop {
     Empty,
     Value(Owned<NodeHeader>),
@@ -105,6 +108,6 @@ impl Queue {
             return Pop::Value(tail);
         }
 
-        return Pop::Empty;
+        Pop::Empty
     }
 }

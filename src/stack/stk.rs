@@ -18,7 +18,7 @@ impl StackMarker for Stk {
     unsafe fn create() -> &'static mut Self {
         // Safety: Stk is an unsized typed so any pointer that is not null is a valid pointer to the type.
         // Therefore we can create a static reference to the type from a dangling pointer.
-        unsafe { Owned::dangling().into_mut().as_mut() }
+        unsafe { Owned::dangling().as_mut() }
     }
 }
 

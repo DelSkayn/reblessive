@@ -20,7 +20,7 @@ pub struct Stk(PhantomData<*mut TreeStack>);
 
 impl StackMarker for Stk {
     unsafe fn create() -> &'static mut Self {
-        Owned::<Stk>::dangling().into_mut().as_mut()
+        Owned::<Stk>::dangling().as_mut()
     }
 }
 
@@ -78,7 +78,7 @@ pub struct ScopeStk {
 
 impl ScopeStk {
     pub(super) unsafe fn new() -> &'static mut Self {
-        Owned::dangling().into_mut().as_mut()
+        Owned::dangling().as_mut()
     }
 }
 

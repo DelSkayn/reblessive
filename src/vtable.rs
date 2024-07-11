@@ -4,7 +4,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use crate::ptr::{map_ptr, Mut};
+use crate::ptr::{map_ptr, Owned};
 
 #[repr(C)]
 pub struct TaskBox<F> {
@@ -16,9 +16,9 @@ pub struct TaskBox<F> {
 #[derive(Debug, Clone)]
 pub(crate) struct VTable {
     /// Funtion to drop the task in place.
-    pub(crate) dropper: unsafe fn(Mut<TaskBox<u8>>),
+    pub(crate) dropper: unsafe fn(Owned<TaskBox<u8>>),
     /// Funtion to drive the task forward.
-    pub(crate) driver: unsafe fn(Mut<TaskBox<u8>>, ctx: &mut Context<'_>) -> Poll<()>,
+    pub(crate) driver: unsafe fn(Owned<TaskBox<u8>>, ctx: &mut Context<'_>) -> Poll<()>,
 }
 
 impl VTable {
@@ -37,14 +37,14 @@ impl VTable {
         &<F as HasVTable>::V_TABLE
     }
 
-    unsafe fn drop_impl<F>(ptr: Mut<TaskBox<u8>>)
+    unsafe fn drop_impl<F>(ptr: Owned<TaskBox<u8>>)
     where
         F: Future<Output = ()>,
     {
         std::ptr::drop_in_place(ptr.cast::<TaskBox<F>>().as_ptr())
     }
 
-    unsafe fn drive_impl<F>(ptr: Mut<TaskBox<u8>>, ctx: &mut Context<'_>) -> Poll<()>
+    unsafe fn drive_impl<F>(ptr: Owned<TaskBox<u8>>, ctx: &mut Context<'_>) -> Poll<()>
     where
         F: Future<Output = ()>,
     {

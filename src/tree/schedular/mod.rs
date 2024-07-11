@@ -24,6 +24,7 @@ use self::queue::NodeHeader;
 
 pub struct CancelToken(Owned<Task<u8>>);
 
+/*
 impl CancelToken {
     pub fn detach(self) {
         // properly drop the pointer,
@@ -33,6 +34,7 @@ impl CancelToken {
         std::mem::forget(self);
     }
 }
+*/
 
 impl Drop for CancelToken {
     fn drop(&mut self) {
@@ -68,7 +70,6 @@ impl Drop for CancelToken {
                 // we transfered the ownership to the queue, so we dont need to decrement the arc
                 // count.
                 _defer.take();
-                return;
             }
         }
     }
@@ -195,6 +196,7 @@ impl Schedular {
         self.all_next.get().is_none()
     }
 
+    /*
     /// # Safety
     /// This function erases any lifetime associated with the future.
     /// Caller must ensure that either the future completes or is dropped before the lifetime
@@ -215,6 +217,7 @@ impl Schedular {
         Pin::new_unchecked(&*self.should_poll).push(task.cast());
         self.len.set(self.len.get() + 1);
     }
+    */
 
     /// # Safety
     /// This function erases any lifetime associated with the future.

@@ -47,23 +47,6 @@ impl StackAllocator {
         (block_addr..=(block_addr + size)).contains(&addr)
     }
 
-    /// Creates an allocator with reserve capacity for atleast cap bytes of space not taking into
-    /// account alignment.
-    pub fn with_capacity(cap: usize) -> Self {
-        let layout = Layout::new::<BlockHeader>();
-        let block_size =
-            layout.size() + cap.next_power_of_two() + Layout::new::<BlockHeader>().size();
-
-        StackAllocator {
-            block: Some(unsafe { Self::alloc_new_block(block_size) }),
-            top: None,
-        }
-    }
-
-    pub fn alloc<T>(&mut self, t: T) -> Owned<T> {
-        self.alloc_with(|| t)
-    }
-
     #[inline(always)]
     pub fn alloc_with<T, F: FnOnce() -> T>(&mut self, f: F) -> Owned<T> {
         #[inline(always)]
@@ -135,7 +118,7 @@ impl StackAllocator {
     pub unsafe fn pop_dealloc(&mut self) {
         let top = self.top.expect("invalid deallocation");
         // if there is a top, there must be a block.
-        let mut block = self.block.unwrap();
+        let block = self.block.unwrap();
         self.top = top.cast::<Option<Owned<u8>>>().read();
 
         if Self::within_block(block, top.addr().get()) {
@@ -169,7 +152,7 @@ impl StackAllocator {
                 .unwrap()
                 .next_power_of_two()
         };
-        let mut block = Self::alloc_new_block(new_alloc_size);
+        let block = Self::alloc_new_block(new_alloc_size);
 
         block.as_mut().previous = Some(old_block);
         self.block = Some(block);
@@ -270,7 +253,7 @@ mod test {
                     v: i,
                     _other: [0usize; 64],
                 };
-                let alloc = alloc.alloc(b);
+                let alloc = alloc.alloc_with(|| b);
                 assert!(!allocations.contains(&alloc));
                 allocations.push(alloc);
             }
@@ -288,7 +271,7 @@ mod test {
             let mut allocations_2 = Vec::new();
 
             for i in 0..amount {
-                let alloc = alloc.alloc(i as u128);
+                let alloc = alloc.alloc_with(|| i as u128);
                 assert!(!allocations_2.contains(&alloc));
                 allocations_2.push(alloc);
             }

@@ -10,6 +10,7 @@
 
 use crate::{
     allocator::StackAllocator,
+    defer::Defer,
     ptr::{map_ptr, Owned},
     vtable::{TaskBox, VTable},
 };
@@ -113,13 +114,10 @@ impl Stack {
         F: FnOnce() -> R,
     {
         let ptr = STACK_PTR.with(|x| x.replace(Some(Owned::from(self))));
-        struct Dropper(Option<Owned<Stack>>);
-        impl Drop for Dropper {
-            fn drop(&mut self) {
-                STACK_PTR.with(|x| x.set(self.0))
-            }
-        }
-        let _dropper = Dropper(ptr);
+        let _defer = Defer::new(ptr, |ptr| {
+            let ptr = *ptr;
+            STACK_PTR.with(|x| x.set(ptr));
+        });
         f()
     }
 
@@ -234,12 +232,12 @@ impl Stack {
 
     unsafe fn drive_task(drive: Owned<TaskBox<u8>>, context: &mut Context) -> Poll<()> {
         let v_table = drive.map_ptr(map_ptr!(Owned<TaskBox<u8>>, v_table)).read();
-        (v_table.driver)(drive.into_mut(), context)
+        (v_table.driver)(drive, context)
     }
 
     unsafe fn drop_task_inline(drive: Owned<TaskBox<u8>>) {
         let v_table = drive.map_ptr(map_ptr!(Owned<TaskBox<u8>>, v_table)).read();
-        (v_table.dropper)(drive.into_mut())
+        (v_table.dropper)(drive)
     }
 
     pub(crate) fn is_rebless_context(&self, context: &mut Context) -> bool {
