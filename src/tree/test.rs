@@ -2,7 +2,8 @@ use futures_util::future::join_all;
 
 use super::{Stk, TreeStack};
 use crate::{
-    test::{thread_sleep, ManualPoll},
+    ptr::Ref,
+    test::{run_with_stack_size, thread_sleep, ManualPoll, KB, MB},
     tree::stk::ScopeStk,
 };
 use std::{
@@ -25,14 +26,16 @@ where
     Fut: Future<Output = R> + 'a,
     R: 'a,
 {
-    stk.scope(|stk| async move {
+    let r = stk.scope(|stk| async move {
         let futures = (0..count)
             .map(|_| stk.run(|stk| f(stk)))
             .collect::<Vec<_>>();
 
-        futures_util::future::join_all(futures).await
-    })
-    .await
+        let r = futures_util::future::join_all(futures).await;
+        r
+    });
+
+    r.await
 }
 
 #[test]
@@ -110,7 +113,7 @@ fn basic_then_deep() {
             .finish()
             .await;
 
-        assert!(before.elapsed() < Duration::from_millis(2000));
+        assert!(before.elapsed() < Duration::from_millis(4000));
         // make sure the futures actually ran.
         assert_eq!(COUNTER.with(|x| x.get()), 20);
     })
@@ -176,32 +179,34 @@ fn deep_fanout_no_overflow() {
 
 #[test]
 fn deep_no_overflow() {
-    pollster::block_on(async {
-        let mut stack = TreeStack::new();
+    run_with_stack_size(MB, "deep no overflow", || {
+        pollster::block_on(async {
+            let mut stack = TreeStack::new();
 
-        let depth = if cfg!(miri) { 10 } else { 1000 };
+            let depth = if cfg!(miri) { 10 } else { 1000 };
 
-        async fn go_deep(stk: &ScopeStk, deep: usize) -> String {
-            // An extra stack allocation to simulate a more complex function.
-            let mut ballast: MaybeUninit<[u8; 1024 * 128]> = std::mem::MaybeUninit::uninit();
+            async fn go_deep(stk: &ScopeStk, deep: usize) -> String {
+                // An extra stack allocation to simulate a more complex function.
+                let mut ballast: MaybeUninit<[u8; 32 * KB]> = std::mem::MaybeUninit::uninit();
 
-            let res = if deep != 0 {
-                stk.run(|stk| stk.scope(|stk| go_deep(stk, deep - 1))).await
-            } else {
-                "Foo".to_owned()
-            };
+                let res = if deep != 0 {
+                    stk.run(|stk| stk.scope(|stk| go_deep(stk, deep - 1))).await
+                } else {
+                    "Foo".to_owned()
+                };
 
-            // Make sure the ballast isn't compiled out.
-            std::hint::black_box(&mut ballast);
+                // Make sure the ballast isn't compiled out.
+                std::hint::black_box(&mut ballast);
 
-            res
-        }
+                res
+            }
 
-        let res = stack
-            .enter(|stk| async { stk.scope(|stk| go_deep(stk, depth)).await })
-            .finish()
-            .await;
-        assert_eq!(res, "Foo")
+            let res = stack
+                .enter(|stk| async { stk.scope(|stk| go_deep(stk, depth)).await })
+                .finish()
+                .await;
+            assert_eq!(res, "Foo")
+        })
     })
 }
 

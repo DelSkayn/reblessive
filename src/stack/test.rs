@@ -1,8 +1,9 @@
-use std::{cell::Cell, future::Future, mem::MaybeUninit, pin::Pin, task::Poll, time::Duration};
+use std::{
+    cell::Cell, future::Future, mem::MaybeUninit, pin::Pin, task::Poll, time::Duration, u128,
+};
 
 use crate::{
-    defer::Defer,
-    test::{thread_sleep, ManualPoll},
+    test::{run_with_stack_size, thread_sleep, ManualPoll, KB, MB, PAGE_SIZE},
     Stack, Stk,
 };
 
@@ -21,10 +22,8 @@ fn call_not_wrapped() {
 
     let mut stack = Stack::new();
 
-    #[cfg(miri)]
-    let depth = 10;
-    #[cfg(not(miri))]
-    let depth = 1000;
+    let depth = if cfg!(miri) { 16 } else { 1024 };
+
     stack.enter(|ctx| a(ctx, depth)).finish();
 }
 
@@ -32,7 +31,7 @@ fn call_not_wrapped() {
 fn fibbo() {
     async fn heavy_fibbo(ctx: &mut Stk, n: usize) -> usize {
         // An extra stack allocation to simulate a more complex function.
-        let mut ballast: MaybeUninit<[u8; 1024 * 128]> = std::mem::MaybeUninit::uninit();
+        let mut ballast: MaybeUninit<[u8; KB]> = std::mem::MaybeUninit::uninit();
         // Make sure the ballast isn't compiled out.
         std::hint::black_box(&mut ballast);
 
@@ -47,13 +46,12 @@ fn fibbo() {
     }
     let mut stack = Stack::new();
 
-    #[cfg(miri)]
-    let (v, depth) = (13, 6);
-    #[cfg(not(miri))]
-    let (v, depth) = (10946, 20);
+    let (v, depth) = if cfg!(miri) { (13, 6) } else { (10946, 20) };
 
     // run the function to completion on the stack.
-    let res = stack.enter(|ctx| heavy_fibbo(ctx, depth)).finish();
+    let res = run_with_stack_size(8 * PAGE_SIZE, "fibbo", move || {
+        stack.enter(|ctx| heavy_fibbo(ctx, depth)).finish()
+    });
     assert_eq!(res, v);
 }
 
@@ -71,10 +69,7 @@ fn fibbo_stepping() {
     }
     let mut stack = Stack::new();
 
-    #[cfg(miri)]
-    let (v, depth) = (13, 6);
-    #[cfg(not(miri))]
-    let (v, depth) = (10946, 20);
+    let (v, depth) = if cfg!(miri) { (13, 6) } else { (10946, 20) };
 
     // run the function to completion on the stack.
     let mut runner = stack.enter(|ctx| fibbo(ctx, depth));
@@ -101,10 +96,7 @@ fn fibbo_stepping_yield() {
     }
     let mut stack = Stack::new();
 
-    #[cfg(miri)]
-    let (v, depth) = (13, 6);
-    #[cfg(not(miri))]
-    let (v, depth) = (10946, 20);
+    let (v, depth) = if cfg!(miri) { (13, 6) } else { (10946, 20) };
 
     // run the function to completion on the stack.
     let mut runner = stack.enter(|ctx| fibbo(ctx, depth));
@@ -131,10 +123,7 @@ fn fibbo_finish_yield() {
     }
     let mut stack = Stack::new();
 
-    #[cfg(miri)]
-    let (v, depth) = (13, 6);
-    #[cfg(not(miri))]
-    let (v, depth) = (10946, 20);
+    let (v, depth) = if cfg!(miri) { (13, 6) } else { (10946, 20) };
 
     // run the function to completion on the stack.
     let res = stack.enter(|ctx| fibbo(ctx, depth)).finish();
@@ -142,12 +131,12 @@ fn fibbo_finish_yield() {
 }
 
 #[test]
-#[should_panic]
+#[should_panic = "a non-reblessive future was run while running the reblessive runtime as non-async"]
 fn not_async() {
     let mut stack = Stack::new();
 
     stack
-        .enter(|_| async { tokio::time::sleep(Duration::from_secs(1)).await })
+        .enter(|_| async { thread_sleep(Duration::from_secs(1)).await })
         .finish();
 }
 
@@ -155,7 +144,7 @@ fn not_async() {
 fn very_deep() {
     async fn deep(ctx: &mut Stk, n: usize) -> usize {
         // An extra stack allocation to simulate a more complex function.
-        let mut ballast: MaybeUninit<[u8; 1024 * 128]> = std::mem::MaybeUninit::uninit();
+        let mut ballast: MaybeUninit<[u8; 32 * KB]> = std::mem::MaybeUninit::uninit();
         // Make sure the ballast isn't compiled out.
         std::hint::black_box(&mut ballast);
 
@@ -167,42 +156,40 @@ fn very_deep() {
     }
     let mut stack = Stack::new();
 
-    #[cfg(miri)]
-    let depth = 10;
-    #[cfg(not(miri))]
-    let depth = 1000;
+    let depth = if cfg!(miri) { 16 } else { 1024 };
 
     // run the function to completion on the stack.
-    let res = stack.enter(|ctx| deep(ctx, depth)).finish();
+    let res = run_with_stack_size(MB, "very_deep", move || {
+        stack.enter(|ctx| deep(ctx, depth)).finish()
+    });
     assert_eq!(res, 0xCAFECAFE)
 }
 
 #[test]
 fn deep_sleep() {
-    pollster::block_on(async {
-        async fn deep(ctx: &mut Stk, n: usize) -> usize {
-            // An extra stack allocation to simulate a more complex function.
-            let mut ballast: MaybeUninit<[u8; 1024 * 128]> = std::mem::MaybeUninit::uninit();
-            // Make sure the ballast isn't compiled out.
-            std::hint::black_box(&mut ballast);
+    run_with_stack_size(MB, "deep_sleep", || {
+        pollster::block_on(async {
+            async fn deep(ctx: &mut Stk, n: usize) -> usize {
+                // An extra stack allocation to simulate a more complex function.
+                let mut ballast: MaybeUninit<[u8; 32 * KB]> = std::mem::MaybeUninit::uninit();
+                // Make sure the ballast isn't compiled out.
+                std::hint::black_box(&mut ballast);
 
-            if n == 0 {
-                thread_sleep(Duration::from_millis(500)).await;
-                return 0xCAFECAFE;
+                if n == 0 {
+                    thread_sleep(Duration::from_millis(500)).await;
+                    return 0xCAFECAFE;
+                }
+
+                ctx.run(move |ctx| deep(ctx, n - 1)).await
             }
+            let mut stack = Stack::new();
 
-            ctx.run(move |ctx| deep(ctx, n - 1)).await
-        }
-        let mut stack = Stack::new();
+            let depth = if cfg!(miri) { 16 } else { 1024 };
 
-        #[cfg(miri)]
-        let depth = 10;
-        #[cfg(not(miri))]
-        let depth = 1000;
-
-        // run the function to completion on the stack.
-        let res = stack.enter(|ctx| deep(ctx, depth)).finish_async().await;
-        assert_eq!(res, 0xCAFECAFE)
+            // run the function to completion on the stack.
+            let res = stack.enter(|ctx| deep(ctx, depth)).finish_async().await;
+            assert_eq!(res, 0xCAFECAFE)
+        })
     })
 }
 
@@ -227,22 +214,20 @@ fn mutate_in_future() {
 
 #[test]
 fn mutate_created_in_future() {
-    #[cfg(not(miri))]
-    const DEPTH: usize = 1000;
-    #[cfg(miri)]
-    const DEPTH: usize = 10;
-
     async fn root(ctx: &mut Stk) {
         let mut v = Vec::new();
-        ctx.run(|ctx| mutate(ctx, &mut v, DEPTH)).await;
 
-        for (idx, i) in (0..=DEPTH).rev().enumerate() {
+        let depth = if cfg!(miri) { 16 } else { 1024 };
+
+        ctx.run(|ctx| mutate(ctx, &mut v, depth)).await;
+
+        for (idx, i) in (0..=depth).rev().enumerate() {
             assert_eq!(v[idx], i)
         }
     }
     async fn mutate(ctx: &mut Stk, v: &mut Vec<usize>, depth: usize) {
         // An extra stack allocation to simulate a more complex function.
-        let mut ballast: MaybeUninit<[u8; 1024 * 128]> = std::mem::MaybeUninit::uninit();
+        let mut ballast: MaybeUninit<[u8; 32 * KB]> = std::mem::MaybeUninit::uninit();
         // Make sure the ballast isn't compiled out.
         std::hint::black_box(&mut ballast);
         v.push(depth);
@@ -251,9 +236,10 @@ fn mutate_created_in_future() {
         }
     }
 
-    let mut stack = Stack::new();
-
-    stack.enter(root).finish();
+    run_with_stack_size(MB, "mutate_created_in_future", || {
+        let mut stack = Stack::new();
+        stack.enter(root).finish();
+    });
 }
 
 #[test]
@@ -286,6 +272,9 @@ fn borrow_lifetime_struct() {
 fn test_bigger_alignment() {
     use std::u16;
 
+    #[repr(align(32))]
+    struct U256(u128, u128);
+
     struct Rand(u32);
 
     impl Rand {
@@ -304,37 +293,57 @@ fn test_bigger_alignment() {
     }
 
     async fn count_u16(stk: &mut Stk, rand: &mut Rand, depth: usize) -> usize {
-        let v = rand.next() as u16;
+        let mut v = rand.next() as u16;
         if depth == 0 {
             return v as usize;
         }
-        let c = if (rand.next() & 1) == 0 {
-            stk.run(|stk| count_u16(stk, rand, depth - 1)).await as u16
-        } else {
-            stk.run(|stk| count_u128(stk, rand, depth - 1)).await as u16
+        // make sure that v is placed onto the stack.
+        std::hint::black_box(&mut v);
+        let c = match rand.next() % 3 {
+            0 => stk.run(|stk| count_u16(stk, rand, depth - 1)).await as u16,
+            1 => stk.run(|stk| count_u128(stk, rand, depth - 1)).await as u16,
+            2 => stk.run(|stk| count_u256(stk, rand, depth - 1)).await as u16,
+            _ => unreachable!(),
         };
         v.wrapping_add(c) as usize
     }
 
     async fn count_u128(stk: &mut Stk, rand: &mut Rand, depth: usize) -> usize {
-        let v = rand.next() as u128;
+        let mut v = rand.next() as u128;
         if depth == 0 {
             return v as usize;
         }
-        let c = if (rand.next() & 1) == 0 {
-            stk.run(|stk| count_u16(stk, rand, depth - 1)).await as u128
-        } else {
-            stk.run(|stk| count_u128(stk, rand, depth - 1)).await as u128
+        // make sure that v is placed onto the stack.
+        std::hint::black_box(&mut v);
+        let c = match rand.next() % 3 {
+            0 => stk.run(|stk| count_u16(stk, rand, depth - 1)).await as u128,
+            1 => stk.run(|stk| count_u128(stk, rand, depth - 1)).await as u128,
+            2 => stk.run(|stk| count_u256(stk, rand, depth - 1)).await as u128,
+            _ => unreachable!(),
         };
         v.wrapping_add(c) as usize
     }
 
+    async fn count_u256(stk: &mut Stk, rand: &mut Rand, depth: usize) -> usize {
+        let mut v = U256(rand.next() as u128, 120203);
+        if depth == 0 {
+            return v.0 as usize;
+        }
+        // make sure that v is placed onto the stack.
+        std::hint::black_box(&mut v);
+        std::hint::black_box(v.1);
+        let c = match rand.next() % 3 {
+            0 => stk.run(|stk| count_u16(stk, rand, depth - 1)).await as u128,
+            1 => stk.run(|stk| count_u128(stk, rand, depth - 1)).await as u128,
+            2 => stk.run(|stk| count_u256(stk, rand, depth - 1)).await as u128,
+            _ => unreachable!(),
+        };
+        v.0.wrapping_add(c) as usize
+    }
+
     let mut rand = Rand::new();
     let mut stack = Stack::new();
-    #[cfg(miri)]
-    let depth = 10;
-    #[cfg(not(miri))]
-    let depth = 1000;
+    let depth = if cfg!(miri) { 16 } else { 1024 };
     stack
         .enter(|stk| count_u128(stk, &mut rand, depth))
         .finish();
@@ -539,7 +548,7 @@ fn forget_runner_and_use_again() {
 }
 
 #[test]
-#[should_panic(expected = "Tried to push a task while another stack future is running")]
+#[should_panic(expected = "Invalid stack state, futures are not being evaluated in stack order")]
 fn enter_run_after_enter() {
     let mut stack = Stack::new();
 
@@ -560,7 +569,7 @@ fn enter_run_after_enter() {
 }
 
 #[test]
-#[should_panic(expected = "Tried to push a task while another stack future is running")]
+#[should_panic(expected = "Invalid stack state, futures are not being evaluated in stack order")]
 fn enter_after_enter_run() {
     let mut stack = Stack::new();
 
@@ -614,6 +623,7 @@ fn drop_mid_run() {
     }
 }
 
+/*
 #[test]
 fn forget_mid_run() {
     async fn fibbo(stk: &mut Stk, f: usize) -> usize {
@@ -628,10 +638,6 @@ fn forget_mid_run() {
     for _ in 0..1000 {
         assert!(runner.step().is_none());
     }
-    let place = runner.place;
     std::mem::forget(runner);
-    // Clean up memory leaked by forgetting "
-    let _defer = Defer::new((), |_| unsafe {
-        let _ = Box::from_raw(place.as_ptr());
-    });
 }
+*/

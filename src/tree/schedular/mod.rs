@@ -3,7 +3,6 @@ use std::{
     future::Future,
     mem::ManuallyDrop,
     pin::Pin,
-    ptr::NonNull,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Weak,
@@ -16,11 +15,11 @@ mod queue;
 mod waker;
 use queue::Queue;
 
-use crate::defer::Defer;
+use crate::{defer::Defer, map_ptr, ptr::Owned};
 
 use self::queue::NodeHeader;
 
-pub struct CancelToken(NonNull<Task<u8>>);
+pub struct CancelToken(Owned<Task<u8>>);
 
 impl CancelToken {
     pub fn detach(self) {
@@ -74,10 +73,10 @@ impl Drop for CancelToken {
 
 #[derive(Debug, Clone)]
 pub(crate) struct VTable {
-    task_incr: unsafe fn(NonNull<Task<u8>>),
-    task_decr: unsafe fn(NonNull<Task<u8>>),
-    task_drive: unsafe fn(NonNull<Task<u8>>, cx: &mut Context) -> Poll<()>,
-    task_drop: unsafe fn(NonNull<Task<u8>>),
+    task_incr: unsafe fn(Owned<Task<u8>>),
+    task_decr: unsafe fn(Owned<Task<u8>>),
+    task_drive: unsafe fn(Owned<Task<u8>>, cx: &mut Context) -> Poll<()>,
+    task_drop: unsafe fn(Owned<Task<u8>>),
 }
 
 impl VTable {
@@ -98,21 +97,24 @@ impl VTable {
         &<F as HasVTable>::V_TABLE
     }
 
-    unsafe fn decr<F: Future<Output = ()>>(ptr: NonNull<Task<u8>>) {
-        Arc::decrement_strong_count(ptr.cast::<Task<F>>().as_ptr())
-    }
-
-    unsafe fn incr<F: Future<Output = ()>>(ptr: NonNull<Task<u8>>) {
-        Arc::increment_strong_count(ptr.cast::<Task<F>>().as_ptr())
-    }
-
-    unsafe fn drop<F: Future<Output = ()>>(ptr: NonNull<Task<u8>>) {
-        ManuallyDrop::drop(&mut (*ptr.as_ref().future.get()))
-    }
-
-    unsafe fn drive<F: Future<Output = ()>>(ptr: NonNull<Task<u8>>, cx: &mut Context) -> Poll<()> {
+    unsafe fn decr<F: Future<Output = ()>>(ptr: Owned<Task<u8>>) {
         let ptr = ptr.cast::<Task<F>>();
-        Pin::new_unchecked(&mut *(*ptr.as_ref().future.get())).poll(cx)
+        Arc::decrement_strong_count(ptr.as_ptr())
+    }
+
+    unsafe fn incr<F: Future<Output = ()>>(ptr: Owned<Task<u8>>) {
+        let ptr = ptr.cast::<Task<F>>();
+        Arc::increment_strong_count(ptr.as_ptr())
+    }
+
+    unsafe fn drop<F: Future<Output = ()>>(ptr: Owned<Task<u8>>) {
+        let future_ptr = ptr.cast::<Task<F>>().map_ptr(map_ptr!(Task<F>, future));
+        ManuallyDrop::drop(&mut (*future_ptr.as_ref().get()))
+    }
+
+    unsafe fn drive<F: Future<Output = ()>>(ptr: Owned<Task<u8>>, cx: &mut Context) -> Poll<()> {
+        let future_ptr = ptr.cast::<Task<F>>().map_ptr(map_ptr!(Task<F>, future));
+        Pin::new_unchecked(&mut *(*future_ptr.as_ref().get())).poll(cx)
     }
 }
 
@@ -158,8 +160,8 @@ struct TaskBody {
     queue: Weak<Queue>,
     vtable: &'static VTable,
     // The double linked list of tasks.
-    next: Cell<Option<NonNull<Task<u8>>>>,
-    prev: Cell<Option<NonNull<Task<u8>>>>,
+    next: Cell<Option<Owned<Task<u8>>>>,
+    prev: Cell<Option<Owned<Task<u8>>>>,
     done: Cell<TaskState>,
     // wether the task is currently in the queue to be re-polled.
     queued: AtomicBool,
@@ -168,8 +170,8 @@ struct TaskBody {
 pub struct Schedular {
     len: Cell<usize>,
     should_poll: Arc<Queue>,
-    all_next: Cell<Option<NonNull<Task<u8>>>>,
-    all_prev: Cell<Option<NonNull<Task<u8>>>>,
+    all_next: Cell<Option<Owned<Task<u8>>>>,
+    all_prev: Cell<Option<Owned<Task<u8>>>>,
 }
 
 impl Schedular {
@@ -201,7 +203,7 @@ impl Schedular {
 
         let task = Arc::new(Task::new(queue, f));
         // One count for the all list and one for the should_poll list.
-        let task = NonNull::new_unchecked(Arc::into_raw(task) as *mut Task<F>);
+        let task = Owned::from_ptr_unchecked(Arc::into_raw(task) as *mut Task<F>);
         Arc::increment_strong_count(task.as_ptr());
         let task = task.cast::<Task<u8>>();
 
@@ -224,7 +226,7 @@ impl Schedular {
 
         // One count for the all list and one for the should_poll list and one for the cancel
         // token.
-        let task = NonNull::new_unchecked(Arc::into_raw(task) as *mut Task<F>);
+        let task = Owned::from_ptr_unchecked(Arc::into_raw(task) as *mut Task<F>);
         Arc::increment_strong_count(task.as_ptr());
         Arc::increment_strong_count(task.as_ptr());
         let task = task.cast::<Task<u8>>();
@@ -239,7 +241,7 @@ impl Schedular {
 
     /// Add a task to the all tasks list.
     /// Assumes ownership of a count in the task arc count.
-    unsafe fn push_task_to_all(&self, task: NonNull<Task<u8>>) {
+    unsafe fn push_task_to_all(&self, task: Owned<Task<u8>>) {
         task.as_ref().body.next.set(self.all_next.get());
 
         if let Some(x) = self.all_next.get() {
@@ -251,7 +253,7 @@ impl Schedular {
         }
     }
 
-    unsafe fn pop_task_all(&self, task: NonNull<Task<u8>>) {
+    unsafe fn pop_task_all(&self, task: Owned<Task<u8>>) {
         task.as_ref().body.queued.store(true, Ordering::Release);
 
         if let TaskState::Running = task.as_ref().body.done.replace(TaskState::Done) {
@@ -276,19 +278,20 @@ impl Schedular {
         self.len.set(self.len.get() - 1);
     }
 
-    unsafe fn drop_task(ptr: NonNull<Task<u8>>) {
-        (ptr.as_ref().body.vtable.task_drop)(ptr)
+    unsafe fn drop_task(ptr: Owned<Task<u8>>) {
+        let vtable = ptr.as_ref().body.vtable;
+        (vtable.task_drop)(ptr)
     }
 
-    unsafe fn incr_task(ptr: NonNull<Task<u8>>) {
+    unsafe fn incr_task(ptr: Owned<Task<u8>>) {
         (ptr.as_ref().body.vtable.task_incr)(ptr)
     }
 
-    unsafe fn decr_task(ptr: NonNull<Task<u8>>) {
+    unsafe fn decr_task(ptr: Owned<Task<u8>>) {
         (ptr.as_ref().body.vtable.task_decr)(ptr)
     }
 
-    unsafe fn drive_task(ptr: NonNull<Task<u8>>, ctx: &mut Context) -> Poll<()> {
+    unsafe fn drive_task(ptr: Owned<Task<u8>>, ctx: &mut Context) -> Poll<()> {
         (ptr.as_ref().body.vtable.task_drive)(ptr, ctx)
     }
 
@@ -402,7 +405,7 @@ impl Schedular {
                 }
             };
 
-            // Task was alread dropped so just decrement its count.
+            // Task was already dropped so just decrement its count.
             unsafe { Self::decr_task(cur.cast()) };
         }
     }

@@ -2,15 +2,16 @@
 
 use std::{
     pin::Pin,
-    ptr::NonNull,
     sync::atomic::Ordering,
     task::{RawWaker, RawWakerVTable, Waker},
 };
 
+use crate::ptr::Owned;
+
 use super::{Schedular, Task};
 
 unsafe fn inner_clone(ptr: *const ()) {
-    let nonnull_ptr = NonNull::new_unchecked((ptr as *mut ()).cast::<Task<u8>>());
+    let nonnull_ptr = Owned::from_ptr_unchecked((ptr as *mut ()).cast::<Task<u8>>());
     Schedular::incr_task(nonnull_ptr);
 }
 
@@ -20,7 +21,7 @@ unsafe fn schedular_clone(ptr: *const ()) -> RawWaker {
 }
 
 unsafe fn schedular_wake(ptr: *const ()) {
-    let task = NonNull::new_unchecked(ptr as *mut ()).cast::<Task<u8>>();
+    let task = Owned::from_ptr_unchecked(ptr as *mut ()).cast::<Task<u8>>();
 
     if task
         .as_ref()
@@ -53,7 +54,7 @@ unsafe fn schedular_wake_ref(ptr: *const ()) {
 }
 
 unsafe fn schedular_drop(ptr: *const ()) {
-    let ptr = NonNull::new_unchecked((ptr as *mut ()).cast::<Task<u8>>());
+    let ptr = Owned::from_ptr_unchecked((ptr as *mut ()).cast::<Task<u8>>());
     Schedular::decr_task(ptr)
 }
 
@@ -64,6 +65,6 @@ static SCHEDULAR_WAKER_V_TABLE: RawWakerVTable = RawWakerVTable::new(
     schedular_drop,
 );
 
-pub unsafe fn get(ptr: NonNull<Task<u8>>) -> Waker {
+pub unsafe fn get(ptr: Owned<Task<u8>>) -> Waker {
     unsafe { Waker::from_raw(RawWaker::new(ptr.as_ptr().cast(), &SCHEDULAR_WAKER_V_TABLE)) }
 }

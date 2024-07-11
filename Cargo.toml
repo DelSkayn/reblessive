@@ -20,6 +20,7 @@ regex = "1.5.3"
 
 [features]
 tree = []
+nightly = []
 
 [package.metadata.docs.rs]
 # document all features
@@ -27,6 +28,9 @@ all-features = true
 # defines the configuration attribute `docsrs`
 rustdoc-args = ["--cfg", "docsrs"]
 
+[[bench]]
+name = "calc"
+harness = false
 [[bench]]
 name = "fibbo"
 harness = false

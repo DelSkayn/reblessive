@@ -1,0 +1,9 @@
+{
+    "lspconfig": {
+        "rust_analyzer": {
+            "rust-analyzer.cargo.features": [
+                "tree"
+            ]
+        }
+    }
+}

@@ -1,14 +1,18 @@
 #![cfg_attr(docrs, feature(doc_cfg))]
+#![cfg_attr(feature = "nightly", feature(strict_provenance))]
+#![cfg_attr(feature = "nightly", feature(exposed_provenance))]
 
 mod allocator;
-pub mod stack;
-mod stub_ctx;
-
 mod defer;
+mod ptr;
+mod stub_waker;
+mod vtable;
+
+pub mod stack;
+
 #[cfg(feature = "tree")]
 #[cfg_attr(docrs, doc(cfg(feature = "tree")))]
 pub mod tree;
-mod vtable;
 
 #[cfg(feature = "tree")]
 #[doc(inline)]

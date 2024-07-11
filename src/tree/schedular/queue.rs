@@ -1,9 +1,11 @@
 use std::{
     cell::Cell,
     pin::Pin,
-    ptr::{self, NonNull},
+    ptr::{self},
     sync::atomic::{AtomicPtr, Ordering},
 };
+
+use crate::ptr::Owned;
 
 use super::atomic_waker::AtomicWaker;
 
@@ -22,13 +24,13 @@ impl NodeHeader {
 pub struct Queue {
     waker: AtomicWaker,
     head: AtomicPtr<NodeHeader>,
-    tail: Cell<*const NodeHeader>,
+    tail: Cell<Owned<NodeHeader>>,
     stub: NodeHeader,
 }
 
 pub enum Pop {
     Empty,
-    Value(NonNull<NodeHeader>),
+    Value(Owned<NodeHeader>),
     Inconsistant,
 }
 
@@ -39,7 +41,7 @@ impl Queue {
         Queue {
             waker: AtomicWaker::new(),
             head: AtomicPtr::new(ptr::null_mut()),
-            tail: Cell::new(ptr::null_mut()),
+            tail: Cell::new(Owned::dangling()),
             stub: NodeHeader {
                 next: AtomicPtr::new(ptr::null_mut()),
             },
@@ -51,15 +53,15 @@ impl Queue {
     }
 
     pub unsafe fn init(self: Pin<&Self>) {
-        let ptr = &self.stub as *const _ as *mut _;
-        self.head.store(ptr, Ordering::Release);
+        let ptr = Owned::from(&self.stub);
+        self.head.store(ptr.as_ptr(), Ordering::Release);
         self.tail.set(ptr);
     }
 
     /// # Safety
     /// - node must be a valid pointer
     /// - Queue must have been properly initialized.
-    pub unsafe fn push(self: Pin<&Self>, node: NonNull<NodeHeader>) {
+    pub unsafe fn push(self: Pin<&Self>, node: Owned<NodeHeader>) {
         node.as_ref().next.store(ptr::null_mut(), Ordering::Release);
 
         let prev = self.get_ref().head.swap(node.as_ptr(), Ordering::AcqRel);
@@ -72,35 +74,35 @@ impl Queue {
     /// - Can only be called from a single thread.
     pub unsafe fn pop(self: Pin<&Self>) -> Pop {
         let mut tail = self.tail.get();
-        let mut next = (*tail).next.load(Ordering::Acquire);
+        let mut next = Owned::from_ptr(tail.as_ref().next.load(Ordering::Acquire));
 
-        if std::ptr::eq(tail, &self.get_ref().stub) {
-            if next.is_null() {
+        if tail == Owned::from(&self.get_ref().stub) {
+            let Some(n) = next else {
                 return Pop::Empty;
-            }
+            };
 
-            self.tail.set(next);
-            tail = next;
-            next = (*next).next.load(std::sync::atomic::Ordering::Acquire);
+            self.tail.set(n);
+            tail = n;
+            next = Owned::from_ptr(n.as_ref().next.load(std::sync::atomic::Ordering::Acquire));
         }
 
-        if !next.is_null() {
-            self.tail.set(next);
-            return Pop::Value(NonNull::new_unchecked(tail as *mut NodeHeader));
+        if let Some(n) = next {
+            self.tail.set(n);
+            return Pop::Value(tail);
         }
 
-        let head = self.head.load(Ordering::Acquire);
-        if !std::ptr::eq(head, tail) {
+        let head = Owned::from_ptr(self.head.load(Ordering::Acquire));
+        if head != Some(tail) {
             return Pop::Inconsistant;
         }
 
-        self.push(NonNull::from(&self.get_ref().stub));
+        self.push(Owned::from(&self.get_ref().stub));
 
-        next = (*tail).next.load(Ordering::Acquire);
+        next = Owned::from_ptr(tail.as_ref().next.load(Ordering::Acquire));
 
-        if !next.is_null() {
-            self.tail.set(next);
-            return Pop::Value(NonNull::new_unchecked(tail as *mut NodeHeader));
+        if let Some(n) = next {
+            self.tail.set(n);
+            return Pop::Value(tail);
         }
 
         return Pop::Empty;

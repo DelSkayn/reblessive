@@ -5,6 +5,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub const KB: usize = 1024;
+pub const MB: usize = 1024 * KB;
+pub const PAGE_SIZE: usize = 4 * KB;
+
 /// A sleep that doesn't rely on epoll and is thus usable in miri.
 pub(crate) async fn thread_sleep(duration: Duration) {
     let deadline = Instant::now() + duration;
@@ -42,5 +46,26 @@ where
         let this = unsafe { self.get_unchecked_mut() };
         let future = unsafe { Pin::new_unchecked(&mut this.future) };
         (&mut this.poll)(future, cx).map(|_| ())
+    }
+}
+
+pub(crate) fn run_with_stack_size<F, R>(size: usize, name: &'static str, f: F) -> R
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    #[cfg(not(miri))]
+    {
+        std::thread::Builder::new()
+            .name(name.to_string())
+            .stack_size(size)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+    #[cfg(miri)]
+    {
+        f()
     }
 }

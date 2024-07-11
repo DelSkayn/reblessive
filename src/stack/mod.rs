@@ -1,360 +1,49 @@
-//! The stack runtime
-//!
-//! A runtime for turning recursive functions into a number of futures which are run from a single
-//! flattened loop, preventing stack overflows.
-//!
-//! This runtime also has support for external async function but it explicitly doesn't support
-//! intra-task concurrency, i.e. calling select or join on multiple futures at the same time. These
-//! types of patterns break the stack allocation pattern which this executor uses to be able to
-//! allocate and run futures efficiently.
-
-use crate::{defer::Defer, stub_ctx};
+use crate::{
+    allocator::StackAllocator,
+    map_ptr,
+    ptr::Owned,
+    vtable::{TaskBox, VTable},
+};
 use std::{
-    cell::{Cell, UnsafeCell},
+    cell::{Cell, RefCell, UnsafeCell},
     future::Future,
+    io::Write,
     marker::PhantomData,
-    pin::Pin,
-    ptr::NonNull,
     task::{Context, Poll},
 };
 
+pub(crate) mod future;
+mod runner;
 mod stk;
-#[cfg(feature = "tree")]
-pub(crate) use stk::{InnerStkFuture, StackMarker};
-pub use stk::{Stk, StkFuture, YieldFuture};
-
-mod task;
-use task::StackTasks;
-
 #[cfg(test)]
 mod test;
 
-/// Future returned by [`Runner::finish_async`]
-#[must_use = "futures do nothing unless you `.await` or poll them"]
-pub struct FinishFuture<'a, R> {
-    runner: Runner<'a, R>,
-}
-
-impl<'a, R> Future for FinishFuture<'a, R> {
-    type Output = R;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        enter_stack_context(self.runner.ptr, || {
-            unsafe {
-                let tasks = &self.runner.ptr.tasks;
-                let old_ctx = self.runner.ptr.set_context(NonNull::from(&*cx).cast());
-                let _defer_context = Defer::new(self.runner.ptr, |ptr| {
-                    ptr.set_context(old_ctx);
-                });
-
-                loop {
-                    let Some(mut task) = tasks.last() else {
-                        panic!("Tasks empty")
-                    };
-
-                    loop {
-                        let defer = Defer::new(tasks, |tasks| tasks.pop());
-
-                        match task.drive(cx) {
-                            // What is happing in a task depends on both what it returns and the
-                            // state of the stack.
-                            // If a task returns Poll::ready it has completed, needs to be popped,
-                            // and the task before it must be executed again.
-                            // For pending it depends on the current state.
-                            // - NewTask: A future pushed a new task onto the stack and then
-                            // yielded back. This means we need to run the new task.
-                            // - Yield: A future requested that we yield back to the stack running.
-                            // - Cancelled: The current stack is being dropped, this should be
-                            // impossible while driving the future.
-                            // - Base: All reblessive futures change the stack state before
-                            // returning Poll::Pending. If no state change happend a non-reblessive
-                            // future must have returned Poll::pending, we therefore need to yield
-                            // back to a parent executor.
-                            Poll::Pending => {
-                                defer.take();
-                                match self.runner.stack_state() {
-                                    State::Base => return Poll::Pending,
-                                    State::NewTask => {
-                                        // New task was pushed so we need to start driving that task.
-                                        self.runner.set_stack_state(State::Base);
-                                        break;
-                                    }
-                                    State::Yield => {
-                                        // Yield was requested but no new task was pushed so continue.
-                                        self.runner.set_stack_state(State::Base);
-                                    }
-                                    State::Cancelled => {
-                                        unreachable!("Stack being dropped while actively driven")
-                                    }
-                                }
-                            }
-                            Poll::Ready(_) => {
-                                std::mem::drop(defer);
-                                if tasks.is_empty() {
-                                    let value = (*self.runner.place.as_ref().get()).take().unwrap();
-                                    return Poll::Ready(value);
-                                }
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        })
-    }
-}
-
-/// Future returned by [`Runner::step_async`]
-#[must_use = "futures do nothing unless you `.await` or poll them"]
-pub struct StepFuture<'a, 'b, R> {
-    runner: &'a mut Runner<'b, R>,
-}
-
-impl<'a, 'b, R> Future for StepFuture<'a, 'b, R> {
-    type Output = Option<R>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        enter_stack_context(self.runner.ptr, || {
-            let old_ctx = self.runner.ptr.set_context(NonNull::from(&*cx).cast());
-            let _defer_context = Defer::new(self.runner.ptr, |ptr| {
-                ptr.set_context(old_ctx);
-            });
-            unsafe {
-                match self.runner.ptr.drive_head(cx) {
-                    Poll::Pending => {
-                        match self.runner.ptr.get_state() {
-                            State::Base => {
-                                // A poll::pending was returned but no new task was created.
-                                // Thus we are waiting on an external future, and need to return
-                                // Poll::pending.
-                                return Poll::Pending;
-                            }
-                            State::Cancelled => {
-                                unreachable!("Stack being dropped while actively driven")
-                            }
-                            State::NewTask => {
-                                self.runner.ptr.set_state(State::Base);
-                                // Poll::Pending was returned and a new future was created, therefore
-                                // we need to continue evaluating tasks so return Poll::Ready
-                                Poll::Ready(None)
-                            }
-                            State::Yield => {
-                                self.runner.ptr.set_state(State::Base);
-                                // Poll::Pending was returned and with a request to interrupt execution
-                                // so return ready
-                                Poll::Ready(None)
-                            }
-                        }
-                    }
-                    Poll::Ready(_) => {
-                        if self.runner.ptr.tasks().is_empty() {
-                            return Poll::Ready(Some(
-                                (*self.runner.place.as_ref().get()).take().unwrap(),
-                            ));
-                        }
-                        Poll::Ready(None)
-                    }
-                }
-            }
-        })
-    }
-}
-
-/// Struct returned by [`Stack::enter`] determines how futures should be ran.
-pub struct Runner<'a, R> {
-    place: NonNull<UnsafeCell<Option<R>>>,
-    ptr: &'a Stack,
-    _stack_marker: PhantomData<&'a mut Stack>,
-    _res_marker: PhantomData<R>,
-}
-
-unsafe impl<'a, R> Send for Runner<'a, R> {}
-unsafe impl<'a, R> Sync for Runner<'a, R> {}
-
-impl<'a, R> Runner<'a, R> {
-    fn stack_state(&self) -> State {
-        self.ptr.get_state()
-    }
-
-    fn set_stack_state(&self, state: State) {
-        self.ptr.set_state(state)
-    }
-
-    /// Drive the stack until it completes.
-    ///
-    /// # Panics
-    ///
-    /// This function will panic if the waker inside the future running on the stack either tries
-    /// to clone the waker or tries to call wake. This function is not meant to used with any other
-    /// future except those generated with the various function provided by the stack. For the
-    /// async version see [`Runner::finish_async`]
-    pub fn finish(mut self) -> R {
-        unsafe { self.finish_inner() }
-    }
-
-    unsafe fn finish_inner(&mut self) -> R {
-        enter_stack_context(self.ptr, || {
-            let waker = stub_ctx::get();
-            let mut context = Context::from_waker(&waker);
-            let old_ctx = self.ptr.set_context(NonNull::from(&context).cast());
-            let _defer_context = Defer::new(self.ptr, |ptr| {
-                ptr.set_context(old_ctx);
-            });
-
-            while let Some(mut task) = self.ptr.tasks.last() {
-                loop {
-                    let this = Defer::new(self.ptr, |this| {
-                        this.tasks.pop();
-                    });
-                    match task.drive(&mut context) {
-                        Poll::Pending => {
-                            this.take();
-                            match self.stack_state() {
-                                State::Yield => {
-                                    self.set_stack_state(State::Base);
-                                }
-                                State::Base => panic!(
-                                    "Recieved a pending request from a non-reblessive future"
-                                ),
-                                State::NewTask => {
-                                    self.set_stack_state(State::Base);
-                                    break;
-                                }
-                                State::Cancelled => {
-                                    unreachable!("Stack being dropped while actively driven.")
-                                }
-                            }
-                        }
-                        Poll::Ready(_) => {
-                            break;
-                        }
-                    }
-                }
-            }
-            (*self.place.as_ref().get()).take().unwrap()
-        })
-    }
-
-    /// Run the spawned future for a single step, returning none if a future either completed or
-    /// spawned a new future onto the stack. Will return some if the root future is finished.
-    ///
-    /// # Panics
-    ///
-    /// This function will panic if the waker inside the future running on the stack either tries
-    /// to clone the waker or tries to call wake. This function is not meant to used with any other
-    /// future except those generated with the various function provided by the stack. For the
-    /// async version see [`Runner::step_async`]
-    pub fn step(&mut self) -> Option<R> {
-        enter_stack_context(self.ptr, || {
-            unsafe {
-                let waker = stub_ctx::get();
-                let mut context = Context::from_waker(&waker);
-                let old_ctx = self.ptr.set_context(NonNull::from(&context).cast());
-                let _defer_context = Defer::new(self.ptr, |ptr| {
-                    ptr.set_context(old_ctx);
-                });
-
-                match self.ptr.drive_head(&mut context) {
-                    Poll::Pending => match self.stack_state() {
-                        State::Base => {
-                            panic!("Recieved a pending request from a non-reblessive future")
-                        }
-                        State::Yield | State::NewTask => {
-                            self.set_stack_state(State::Base);
-                        }
-                        State::Cancelled => unreachable!("Stack dropped while being stepped"),
-                    },
-                    Poll::Ready(_) => {
-                        if self.ptr.tasks.len() == 0 {
-                            return Some((*self.place.as_ref().get()).take().unwrap());
-                        }
-                    }
-                }
-            }
-            None
-        })
-    }
-
-    /// Run the spawned future for a single step, returning none if a future either completed or
-    /// spawned a new future onto the stack. Will return some if the root future is finished.
-    ///
-    /// This function supports sleeping or taking ownership of the waker allowing it to be used
-    /// with external async runtimes.
-    pub fn step_async<'b>(&'b mut self) -> StepFuture<'b, 'a, R> {
-        StepFuture { runner: self }
-    }
-
-    /// Returns the number of futures currently spawned on the stack.
-    pub fn depth(&self) -> usize {
-        self.ptr.tasks.len()
-    }
-
-    /// Drive the stack until it completes.
-    ///
-    /// This function supports cloning and awakening allowing it to be used with external async
-    /// runtimes
-    pub fn finish_async(self) -> FinishFuture<'a, R> {
-        FinishFuture { runner: self }
-    }
-}
-
-impl<'a, R> Drop for Runner<'a, R> {
-    fn drop(&mut self) {
-        self.ptr.clear();
-        unsafe { std::mem::drop(Box::from_raw(self.place.as_ptr())) };
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum State {
-    /// normal execution of the stack.
-    Base,
-    /// A new task was pushed to the Stack
-    /// the current running future should yield back to the stack to continue executing the current
-    /// future.
-    NewTask,
-    /// Yielding was requested by a future.
-    Yield,
-    /// State used when the stack is being dropped and all the futures should be cancelledd.
-    Cancelled,
-}
+pub use runner::{FinishFuture, Runner, StepFuture};
+pub(crate) use stk::StackMarker;
+pub use stk::Stk;
 
 thread_local! {
-    static STACK_PTR: Cell<Option<NonNull<Stack>>> = const { Cell::new(None) };
+    static STACK_PTR: Cell<Option<Owned<Stack>>> = const { Cell::new(None) };
 }
 
-pub(crate) fn enter_stack_context<F, R>(context: &Stack, f: F) -> R
-where
-    F: FnOnce() -> R,
-{
-    let ptr = STACK_PTR.with(|x| x.replace(Some(NonNull::from(context))));
-    struct Dropper(Option<NonNull<Stack>>);
-    impl Drop for Dropper {
-        fn drop(&mut self) {
-            STACK_PTR.with(|x| x.set(self.0))
-        }
-    }
-    let _dropper = Dropper(ptr);
-    f()
-}
+type ResultPlace<T> = UnsafeCell<Option<T>>;
 
-pub(crate) fn with_stack_context<F, R>(f: F) -> R
-where
-    F: FnOnce(&Stack) -> R,
-{
-    let ptr = STACK_PTR
-        .with(|x| x.get())
-        .expect("Not within a stack context");
-    unsafe { f(ptr.as_ref()) }
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
+pub enum StackState {
+    NewTask,
+    Base,
+    Yield,
+    Cancelled,
 }
 
 /// A small minimal runtime for executing futures flattened onto the heap preventing stack
 /// overflows on deeply nested futures. Only capable of running a single future at the same time
 /// and has no support for waking tasks by itself.
 pub struct Stack {
-    state: Cell<State>,
-    tasks: StackTasks,
-    context: Cell<NonNull<()>>,
+    allocator: RefCell<StackAllocator>,
+    pub(crate) len: Cell<usize>,
+    pub(crate) state: Cell<StackState>,
+    async_context: Cell<usize>,
 }
 
 unsafe impl Send for Stack {}
@@ -365,20 +54,22 @@ impl Stack {
     ///
     /// This function does not allocate.
     pub fn new() -> Self {
-        Stack {
-            state: Cell::new(State::Base),
-            tasks: StackTasks::new(),
-            context: Cell::new(NonNull::dangling()),
+        Self {
+            allocator: RefCell::new(StackAllocator::new()),
+            len: Cell::new(0),
+            state: Cell::new(StackState::Base),
+            async_context: Cell::new(Owned::<u8>::dangling().addr().get()),
         }
     }
 
     /// Create a new empty stack to run reblessive futures in with atleast cap bytes reserved for
     /// future allocation.
     pub fn with_capacity(cap: usize) -> Self {
-        Stack {
-            state: Cell::new(State::Base),
-            tasks: StackTasks::with_capacity(cap),
-            context: Cell::new(NonNull::dangling()),
+        Self {
+            allocator: RefCell::new(StackAllocator::with_capacity(cap)),
+            len: Cell::new(0),
+            state: Cell::new(StackState::Base),
+            async_context: Cell::new(Owned::<u8>::dangling().addr().get()),
         }
     }
 
@@ -388,72 +79,213 @@ impl Stack {
         F: FnOnce(&'a mut Stk) -> Fut,
         Fut: Future<Output = R> + 'a,
     {
-        assert!(
-            self.tasks.is_empty(),
-            "Stack left in inconsistent state, was a previous runner leaked?"
+        let fut = unsafe { f(Stk::create()) };
+
+        unsafe { self.enter_future(fut) }
+
+        Runner {
+            stack: self,
+            _marker: PhantomData,
+        }
+    }
+
+    pub(crate) unsafe fn enter_future<F, R>(&self, fut: F)
+    where
+        F: Future<Output = R>,
+    {
+        assert_eq!(
+            self.len.get(),
+            0,
+            "Stack still has unresolved futures, did a previous runner leak?"
         );
-        unsafe {
-            let ctx = Stk::new();
 
-            let place = Box::new(UnsafeCell::new(None));
-            let place_ptr = NonNull::new_unchecked(Box::into_raw(place));
-            let fut = (f)(ctx);
+        let place_ptr = self
+            .allocator
+            .borrow_mut()
+            .alloc_with::<ResultPlace<R>, _>(|| UnsafeCell::new(None));
 
-            self.tasks.push(async move {
-                place_ptr.as_ref().get().write(Some(fut.await));
-            });
+        self.len.set(1);
 
-            Runner {
-                place: place_ptr,
-                ptr: self,
-                _stack_marker: PhantomData,
-                _res_marker: PhantomData,
-            }
-        }
+        self.alloc_future(
+            async move { unsafe { place_ptr.as_ref().get().write(Some(fut.await)) } },
+        );
     }
 
-    pub(crate) fn drive_head(&self, cx: &mut Context) -> Poll<()> {
-        let this = Defer::new(self, |this| unsafe {
-            // Ensure that if the task panics it is being dropped
-            this.tasks().pop();
+    pub(crate) fn enter_context<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        let ptr = STACK_PTR.with(|x| x.replace(Some(Owned::from(self))));
+        struct Dropper(Option<Owned<Stack>>);
+        impl Drop for Dropper {
+            fn drop(&mut self) {
+                STACK_PTR.with(|x| x.set(self.0))
+            }
+        }
+        let _dropper = Dropper(ptr);
+        f()
+    }
+
+    pub(crate) fn with_context<F, R>(f: F) -> R
+    where
+        F: FnOnce(&Self) -> R,
+    {
+        let ptr = STACK_PTR
+            .with(|x| x.get())
+            .expect("Not within a stack context");
+        unsafe { f(ptr.as_ref()) }
+    }
+
+    fn alloc_future<F>(&self, f: F) -> Owned<TaskBox<u8>>
+    where
+        F: Future<Output = ()>,
+    {
+        let res = self
+            .allocator
+            .borrow_mut()
+            .alloc_with(|| TaskBox {
+                v_table: VTable::get::<F>(),
+                future: f,
+            })
+            .cast();
+        self.len.set(self.len.get() + 1);
+        res
+    }
+
+    pub(crate) fn pending_tasks(&self) -> usize {
+        self.len.get().saturating_sub(1)
+    }
+
+    // tries to get the final result of the last allocation
+    pub(crate) unsafe fn try_get_result<R>(&self) -> Option<R> {
+        if self.len.get() == 1 {
+            let place_ptr = self.allocator.borrow().top().unwrap();
+            let res = (*place_ptr.cast::<ResultPlace<R>>().as_ref().get()).take();
+            assert!(
+                res.is_some(),
+                "Result was not writen even after all futures finished!",
+            );
+
+            self.allocator.borrow_mut().pop_dealloc();
+            self.len.set(0);
+
+            return res;
+        }
+        None
+    }
+
+    pub(crate) unsafe fn drive_top_task(&self, context: &mut Context) -> Poll<bool> {
+        self.enter_context(|| {
+            let task = self.allocator.borrow().top().unwrap().cast::<TaskBox<u8>>();
+            let r = Self::drive_task(task, context);
+            match r {
+                Poll::Ready(_) => {
+                    // task was ready, it can be popped.
+                    self.pop_task();
+                    return Poll::Ready(false);
+                }
+                Poll::Pending => {
+                    // the future yielded, find out why,
+                    match self.state.get() {
+                        StackState::Base => {
+                            // State didn't change, but future still yielded,
+                            // This means that some outside future yielded so we should yield too.
+                            return Poll::Pending;
+                        }
+                        StackState::Yield => {
+                            // A future requested a yield for the reblessive runtime
+                            self.state.set(StackState::Base);
+                            return Poll::Ready(true);
+                        }
+                        StackState::Cancelled => {
+                            panic!("stack should never be running tasks while cancelling")
+                        }
+                        StackState::NewTask => {
+                            self.state.set(StackState::Base);
+                            return Poll::Ready(false);
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    pub(crate) unsafe fn push_task<F>(&self, f: F)
+    where
+        F: Future<Output = ()>,
+    {
+        std::io::stdout().flush().unwrap();
+        let old = self.state.replace(StackState::NewTask);
+        assert_eq!(
+            old,
+            StackState::Base,
+            "Invalid stack state, futures are not being evaluated in stack order."
+        );
+        self.alloc_future(f);
+    }
+
+    pub(crate) unsafe fn pop_task(&self) {
+        let task = self.allocator.borrow().top().unwrap().cast::<TaskBox<u8>>();
+        Self::drop_task_inline(task);
+        self.allocator.borrow_mut().pop_dealloc();
+        self.len.set(self.len.get() - 1);
+    }
+
+    pub(crate) unsafe fn pop_cancel_task(&self) {
+        let old_state = self.state.replace(StackState::Cancelled);
+        self.pop_task();
+        self.state.set(old_state);
+    }
+
+    unsafe fn drive_task(drive: Owned<TaskBox<u8>>, context: &mut Context) -> Poll<()> {
+        let v_table = drive.map_ptr(map_ptr!(Owned<TaskBox<u8>>, v_table)).read();
+        (v_table.driver)(drive.into_mut(), context)
+    }
+
+    unsafe fn drop_task_inline(drive: Owned<TaskBox<u8>>) {
+        let v_table = drive.map_ptr(map_ptr!(Owned<TaskBox<u8>>, v_table)).read();
+        (v_table.dropper)(drive.into_mut())
+    }
+
+    pub(crate) fn is_rebless_context(&self, context: &mut Context) -> bool {
+        self.async_context.get() == Owned::from(context).addr().get()
+    }
+
+    pub(crate) fn set_rebless_context(&self, context: &mut Context) -> usize {
+        self.set_rebless_context_addr(Owned::from(context).addr().get())
+    }
+
+    pub(crate) fn set_rebless_context_addr(&self, context: usize) -> usize {
+        self.async_context.replace(context)
+    }
+
+    pub(crate) unsafe fn clear<R>(&self) {
+        if self.len.get() == 0 {
+            // No tasks pushed, nothing to be done.
+            return;
+        }
+
+        // Clear all the futures
+        self.enter_context(|| {
+            let mut borrow = self.allocator.borrow_mut();
+            for _ in 1..self.len.get() {
+                unsafe { Self::drop_task_inline(borrow.top().unwrap().cast()) }
+                borrow.pop_dealloc();
+            }
         });
-        let Some(mut task) = this.tasks.last() else {
-            panic!("Missing tasks");
-        };
 
-        match unsafe { task.drive(cx) } {
-            Poll::Pending => {
-                this.take();
-                Poll::Pending
-            }
-            Poll::Ready(_) => Poll::Ready(()),
+        // If the count was less then or equal to 2 it means that the final future might have
+        // produced a result, so we need to take the possible result out of final pointer to run
+        // it's drop, if any
+        if std::mem::needs_drop::<R>() && self.len.get() <= 2 {
+            let place_ptr = self.allocator.borrow().top().unwrap();
+            (*place_ptr.cast::<UnsafeCell<Option<R>>>().as_ref().get()).take();
         }
-    }
 
-    pub(crate) fn tasks(&self) -> &StackTasks {
-        &self.tasks
-    }
-
-    pub(crate) fn get_state(&self) -> State {
-        self.state.get()
-    }
-
-    pub(crate) fn set_state(&self, state: State) {
-        self.state.set(state)
-    }
-
-    pub(crate) fn set_context(&self, cx: NonNull<()>) -> NonNull<()> {
-        self.context.replace(cx)
-    }
-
-    pub(crate) fn is_root_context(&self, ctx: &mut Context) -> bool {
-        self.context.get() == NonNull::from(ctx).cast()
-    }
-
-    pub(crate) fn clear(&self) {
-        self.set_state(State::Cancelled);
-        enter_stack_context(self, || self.tasks.clear());
-        self.set_state(State::Base);
+        // Deallocate the result allocation.
+        self.allocator.borrow_mut().pop_dealloc();
+        // reset len since the stack is now empty.
+        self.len.set(0);
     }
 }
 
@@ -465,7 +297,8 @@ impl Default for Stack {
 
 impl Drop for Stack {
     fn drop(&mut self) {
-        self.set_state(State::Cancelled);
-        enter_stack_context(self, || self.tasks().clear())
+        // clear some memory, this might leak if the root value had allocations but this leak will
+        // only happen if the Runner was leaked.
+        unsafe { self.clear::<()>() }
     }
 }

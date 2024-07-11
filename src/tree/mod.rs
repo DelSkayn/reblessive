@@ -1,192 +1,29 @@
-pub use crate::stack::YieldFuture;
-use crate::{
-    defer::Defer,
-    stack::{enter_stack_context, State},
-    Stack,
-};
+use crate::{defer::Defer, ptr::Owned, stack::StackMarker, Stack};
 use std::{
-    cell::{Cell, UnsafeCell},
+    cell::Cell,
     future::Future,
-    marker::PhantomData,
-    pin::Pin,
-    ptr::NonNull,
     task::{Context, Poll},
 };
 
+mod future;
+mod runner;
 mod schedular;
-use schedular::Schedular;
-
 mod stk;
-pub use stk::{ScopeFuture, Stk, StkFuture};
 
 #[cfg(test)]
 mod test;
 
-#[must_use = "futures do nothing unless you `.await` or poll them"]
-pub struct FinishFuture<'a, R> {
-    runner: Runner<'a, R>,
-}
-
-impl<'a, R> Future for FinishFuture<'a, R> {
-    type Output = R;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        enter_stack_context(&self.runner.ptr.root, || {
-            let ptr = self.runner.ptr.root.set_context(NonNull::from(&*cx).cast());
-            let defer = Defer::new(self.runner.ptr, |schedular| {
-                schedular.root.set_context(ptr);
-            });
-
-            enter_tree_context(&self.runner.ptr.fanout, || {
-                loop {
-                    // First we need finish all fanout futures.
-                    while !defer.fanout.is_empty() {
-                        if unsafe { defer.fanout.poll(cx) }.is_pending() {
-                            return Poll::Pending;
-                        }
-                    }
-
-                    // No futures left in fanout, run on the root stack.
-                    match defer.root.drive_head(cx) {
-                        Poll::Ready(_) => {
-                            if defer.root.tasks().is_empty() {
-                                unsafe {
-                                    return Poll::Ready(
-                                        (*self.runner.place.as_ref().get()).take().unwrap(),
-                                    );
-                                }
-                            }
-                        }
-                        Poll::Pending => match defer.root.get_state() {
-                            State::Base => {
-                                if defer.fanout.is_empty() {
-                                    return Poll::Pending;
-                                }
-                            }
-                            State::Cancelled => unreachable!("TreeStack dropped while stepping"),
-                            State::NewTask | State::Yield => {
-                                defer.root.set_state(State::Base);
-                            }
-                        },
-                    }
-                }
-            })
-        })
-    }
-}
-
-#[must_use = "futures do nothing unless you `.await` or poll them"]
-pub struct StepFuture<'a, 'b, R> {
-    runner: &'a mut Runner<'b, R>,
-}
-
-impl<'a, 'b, R> Future for StepFuture<'a, 'b, R> {
-    type Output = Option<R>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        enter_stack_context(&self.runner.ptr.root, || {
-            let ptr = self.runner.ptr.root.set_context(NonNull::from(&*cx).cast());
-            let defer = Defer::new(self.runner.ptr, |schedular| {
-                schedular.root.set_context(ptr);
-            });
-
-            enter_tree_context(&defer.fanout, || {
-                if !defer.fanout.is_empty() {
-                    if unsafe { defer.fanout.poll(cx) }.is_pending() {
-                        return Poll::Pending;
-                    }
-                }
-
-                // No futures left in fanout, run on the root stack.l
-                match defer.root.drive_head(cx) {
-                    Poll::Ready(_) => {
-                        if defer.root.tasks().is_empty() {
-                            unsafe {
-                                return Poll::Ready(Some(
-                                    (*self.runner.place.as_ref().get()).take().unwrap(),
-                                ));
-                            }
-                        }
-                    }
-                    Poll::Pending => match defer.root.get_state() {
-                        State::Base => {
-                            if defer.fanout.is_empty() {
-                                return Poll::Pending;
-                            } else {
-                                return Poll::Ready(None);
-                            }
-                        }
-                        State::Cancelled => unreachable!("TreeStack dropped while stepping"),
-                        State::NewTask | State::Yield => {
-                            defer.root.set_state(State::Base);
-                        }
-                    },
-                }
-                Poll::Ready(None)
-            })
-        })
-    }
-}
-
-pub struct Runner<'a, R> {
-    place: NonNull<UnsafeCell<Option<R>>>,
-    ptr: &'a TreeStack,
-    _stack_marker: PhantomData<&'a mut TreeStack>,
-}
-
-unsafe impl<'a, R> Send for Runner<'a, R> {}
-unsafe impl<'a, R> Sync for Runner<'a, R> {}
-
-impl<'a, R> Runner<'a, R> {
-    pub fn finish(self) -> FinishFuture<'a, R> {
-        FinishFuture { runner: self }
-    }
-
-    pub fn step<'b>(&'b mut self) -> StepFuture<'b, 'a, R> {
-        StepFuture { runner: self }
-    }
-}
-
-impl<'a, R> Drop for Runner<'a, R> {
-    fn drop(&mut self) {
-        self.ptr.root.clear();
-        self.ptr.fanout.clear();
-        unsafe { std::mem::drop(Box::from_raw(self.place.as_ptr())) };
-    }
-}
+use runner::Runner;
+use schedular::Schedular;
+pub use stk::Stk;
 
 thread_local! {
-    static TREE_PTR: Cell<Option<NonNull<Schedular>>> = const { Cell::new(None) };
-}
-
-pub fn enter_tree_context<F, R>(ctx: &Schedular, f: F) -> R
-where
-    F: FnOnce() -> R,
-{
-    let ptr = TREE_PTR.with(|x| x.replace(Some(NonNull::from(ctx))));
-    struct Dropper(Option<NonNull<Schedular>>);
-    impl Drop for Dropper {
-        fn drop(&mut self) {
-            TREE_PTR.with(|x| x.set(self.0))
-        }
-    }
-    let _dropper = Dropper(ptr);
-    f()
-}
-
-pub fn with_tree_context<F, R>(f: F) -> R
-where
-    F: FnOnce(&Schedular) -> R,
-{
-    let ptr = TREE_PTR
-        .with(|x| x.get())
-        .expect("Not within a tree stack context");
-    unsafe { f(ptr.as_ref()) }
+    static TREE_PTR: Cell<Option<Owned<Schedular>>> = const { Cell::new(None) };
 }
 
 pub struct TreeStack {
     root: Stack,
-    fanout: Schedular,
+    schedular: Schedular,
 }
 
 unsafe impl Send for TreeStack {}
@@ -196,7 +33,7 @@ impl TreeStack {
     pub fn new() -> Self {
         TreeStack {
             root: Stack::new(),
-            fanout: Schedular::new(),
+            schedular: Schedular::new(),
         }
     }
 
@@ -205,21 +42,46 @@ impl TreeStack {
         F: FnOnce(&'a mut Stk) -> Fut,
         Fut: Future<Output = R> + 'a,
     {
-        let future = unsafe { f(Stk::new()) };
-        let place = Box::into_raw(Box::new(UnsafeCell::new(None)));
-        let place = unsafe { NonNull::new_unchecked(place) };
+        let fut = unsafe { f(Stk::create()) };
 
-        self.root.tasks().push(async move {
-            unsafe {
-                (*place.as_ref().get()) = Some(future.await);
-            }
-        });
+        unsafe { self.root.enter_future(fut) };
 
-        Runner {
-            place,
-            ptr: self,
-            _stack_marker: PhantomData,
+        Runner::new(self)
+    }
+
+    pub(crate) fn enter_context<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        let old = TREE_PTR.replace(Some(Owned::from(&self.schedular)));
+        let _defer = Defer::new(old, |old| TREE_PTR.set(*old));
+        f()
+    }
+
+    pub(crate) fn with_context<F, R>(f: F) -> R
+    where
+        F: FnOnce(&Schedular) -> R,
+    {
+        unsafe {
+            f(TREE_PTR
+                .get()
+                .expect("Used TreeStack functions outside of TreeStack context")
+                .as_ref())
         }
+    }
+
+    pub(crate) unsafe fn drive_top_task(&self, context: &mut Context) -> Poll<bool> {
+        self.enter_context(|| {
+            if !self.schedular.is_empty() {
+                let pending = self
+                    .root
+                    .enter_context(|| self.schedular.poll(context).is_pending());
+                if pending {
+                    return Poll::Pending;
+                }
+            }
+            self.root.drive_top_task(context)
+        })
     }
 }
 
