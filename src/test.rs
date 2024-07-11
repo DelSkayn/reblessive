@@ -66,6 +66,7 @@ where
     }
     #[cfg(miri)]
     {
+        let (_, _) = (size, name);
         f()
     }
 }
