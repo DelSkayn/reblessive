@@ -26,13 +26,13 @@ impl<T, F: FnOnce(&mut T)> Deref for Defer<T, F> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &*self.value
+        &self.value
     }
 }
 
 impl<T, F: FnOnce(&mut T)> DerefMut for Defer<T, F> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut *self.value
+        &mut self.value
     }
 }
 

@@ -24,10 +24,7 @@ pub struct Owned<T> {
 impl<T> Copy for Owned<T> {}
 impl<T> Clone for Owned<T> {
     fn clone(&self) -> Self {
-        Self {
-            ptr: self.ptr,
-            _marker: PhantomData,
-        }
+        *self
     }
 }
 
@@ -85,10 +82,7 @@ pub struct Ref<'a, T> {
 impl<T> Copy for Ref<'_, T> {}
 impl<T> Clone for Ref<'_, T> {
     fn clone(&self) -> Self {
-        Self {
-            ptr: self.ptr,
-            _marker: PhantomData,
-        }
+        *self
     }
 }
 
@@ -212,7 +206,7 @@ macro_rules! impl_base_methods {
 
         impl<$($lt,)?$gen> PartialOrd for $ty<$($lt,)?$gen> {
             fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-                self.ptr.partial_cmp(&other.ptr)
+                Some(self.ptr.cmp(&other.ptr))
             }
         }
 

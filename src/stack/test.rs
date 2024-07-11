@@ -1,6 +1,4 @@
-use std::{
-    cell::Cell, future::Future, mem::MaybeUninit, pin::Pin, task::Poll, time::Duration, u128,
-};
+use std::{cell::Cell, future::Future, mem::MaybeUninit, pin::Pin, task::Poll, time::Duration};
 
 use crate::{
     test::{run_with_stack_size, thread_sleep, ManualPoll, KB, MB, PAGE_SIZE},
@@ -270,8 +268,6 @@ fn borrow_lifetime_struct() {
 
 #[test]
 fn test_bigger_alignment() {
-    use std::u16;
-
     #[repr(align(32))]
     struct U256(u128, u128);
 
@@ -499,7 +495,6 @@ fn drop_future() {
     }
 
     async fn inner(stk: &mut Stk) {
-        std::mem::drop(stk.yield_now());
         stk.run(other).await;
         std::mem::drop(stk.run(other));
         stk.run(other).await;
@@ -535,7 +530,6 @@ fn forget_runner_and_use_again() {
     }
 
     async fn inner(stk: &mut Stk) {
-        std::mem::drop(stk.yield_now());
         stk.run(other).await;
         std::mem::drop(stk.run(other));
         stk.run(other).await;

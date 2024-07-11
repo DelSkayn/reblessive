@@ -49,7 +49,7 @@ impl fmt::Display for Error {
 }
 
 fn is_number_char(v: u8) -> bool {
-    (b'0'..=b'9').contains(&v) || matches!(v, b'.' | b'e' | b'E')
+    v.is_ascii_digit() || matches!(v, b'.' | b'e' | b'E')
 }
 
 struct Buffer<'a>(&'a [u8]);

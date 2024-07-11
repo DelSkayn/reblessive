@@ -57,11 +57,10 @@ impl<'a, R> Runner<'a, R> {
         let mut context = Context::from_waker(&waker);
         let rebless_addr = self.stack.set_rebless_context(&mut context);
 
-        match unsafe { self.stack.drive_top_task(&mut context) } {
-            Poll::Pending => {
-                panic!("a non-reblessive future was run while running the reblessive runtime as non-async")
-            }
-            _ => {}
+        if unsafe { self.stack.drive_top_task(&mut context) }.is_pending() {
+            panic!(
+                "a non-reblessive future was run while running the reblessive runtime as non-async"
+            )
         }
 
         self.stack.set_rebless_context_addr(rebless_addr);
@@ -119,8 +118,8 @@ impl<R> Future for StepFuture<'_, R> {
         let r = unsafe { self.stack.drive_top_task(cx) };
         self.stack.set_rebless_context_addr(rebless_addr);
         match r {
-            Poll::Ready(_) => return Poll::Ready(None),
-            Poll::Pending => return Poll::Pending,
+            Poll::Ready(_) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
         }
     }
 }

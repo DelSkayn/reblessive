@@ -14,7 +14,7 @@ use crate::{
     vtable::{TaskBox, VTable},
 };
 use std::{
-    cell::{Cell, RefCell, UnsafeCell},
+    cell::{Cell, UnsafeCell},
     future::Future,
     io::Write,
     marker::PhantomData,
@@ -177,7 +177,7 @@ impl Stack {
                 Poll::Ready(_) => {
                     // task was ready, it can be popped.
                     self.pop_task();
-                    return Poll::Ready(false);
+                    Poll::Ready(false)
                 }
                 Poll::Pending => {
                     // the future yielded, find out why,
@@ -185,19 +185,19 @@ impl Stack {
                         StackState::Base => {
                             // State didn't change, but future still yielded,
                             // This means that some outside future yielded so we should yield too.
-                            return Poll::Pending;
+                            Poll::Pending
                         }
                         StackState::Yield => {
                             // A future requested a yield for the reblessive runtime
                             self.state.set(StackState::Base);
-                            return Poll::Ready(true);
+                            Poll::Ready(true)
                         }
                         StackState::Cancelled => {
                             panic!("stack should never be running tasks while cancelling")
                         }
                         StackState::NewTask => {
                             self.state.set(StackState::Base);
-                            return Poll::Ready(false);
+                            Poll::Ready(false)
                         }
                     }
                 }

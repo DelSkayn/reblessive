@@ -1,4 +1,4 @@
-use std::{alloc::Layout, usize};
+use std::alloc::Layout;
 
 use crate::ptr::Owned;
 

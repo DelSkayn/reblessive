@@ -82,7 +82,7 @@ where
                         })
                     }
                 }
-                return Poll::Pending;
+                Poll::Pending
             }
             StkFutureState::Running(ref closure) => {
                 let Some(x) = closure.take() else {
@@ -91,9 +91,9 @@ where
 
                 this.state = StkFutureState::Done;
 
-                return Poll::Ready(x);
+                Poll::Ready(x)
             }
-            StkFutureState::Done => return Poll::Pending,
+            StkFutureState::Done => Poll::Pending,
         })
     }
 }
