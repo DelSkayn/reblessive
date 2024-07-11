@@ -1,7 +1,6 @@
 use super::{schedular::CancelToken, stk::ScopeStk, Stk};
 use crate::{
-    map_ptr,
-    ptr::{Mut, Owned},
+    ptr::{map_ptr, Mut, Owned},
     stack::{future::InnerStkFuture, StackState},
     Stack, TreeStack,
 };
@@ -64,7 +63,7 @@ impl<'a, F, Fut, R> Future for ScopeFuture<'a, F, R>
 where
     F: FnOnce(&'a ScopeStk) -> Fut,
     Fut: Future<Output = R> + 'a,
-    R: Default + 'a,
+    R: 'a,
 {
     type Output = R;
 

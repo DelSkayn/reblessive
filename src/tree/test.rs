@@ -2,7 +2,6 @@ use futures_util::future::join_all;
 
 use super::{Stk, TreeStack};
 use crate::{
-    ptr::Ref,
     test::{run_with_stack_size, thread_sleep, ManualPoll, KB, MB},
     tree::stk::ScopeStk,
 };

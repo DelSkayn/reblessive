@@ -138,6 +138,7 @@ where
     }
 }
 
+/// Future returned by [`Stk::yield_now`]
 pub struct YieldFuture<'a>(bool, PhantomData<&'a mut Stk>);
 
 impl YieldFuture<'_> {

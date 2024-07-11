@@ -1,15 +1,20 @@
 use std::{fmt, marker::PhantomData, num::NonZeroUsize, ptr::NonNull};
 
-#[macro_export]
-macro_rules! map_ptr {
-    ($ty:ty $(,$field:ident)*) => {
-        |x| {
-            let ptr = x;
-            $(let ptr = std::ptr::addr_of_mut!((*ptr).$field);)*
-            ptr
-        }
-    };
+#[macro_use]
+mod mac {
+    #[doc(hidden)]
+    #[macro_export]
+    macro_rules! __map_ptr {
+        ($ty:ty $(,$field:ident)*) => {
+            |x| {
+                let ptr = x;
+                $(let ptr = std::ptr::addr_of_mut!((*ptr).$field);)*
+                ptr
+            }
+        };
+    }
 }
+pub(crate) use crate::__map_ptr as map_ptr;
 
 pub struct Owned<T> {
     ptr: NonNull<T>,

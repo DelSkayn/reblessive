@@ -242,7 +242,7 @@ impl Drop for StackAllocator {
 
 #[cfg(test)]
 mod test {
-    use crate::{map_ptr, ptr::Owned};
+    use crate::ptr::{map_ptr, Owned};
 
     use super::StackAllocator;
 

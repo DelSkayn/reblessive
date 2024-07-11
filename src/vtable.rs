@@ -4,7 +4,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use crate::{map_ptr, ptr::Mut};
+use crate::ptr::{map_ptr, Mut};
 
 #[repr(C)]
 pub struct TaskBox<F> {

@@ -9,6 +9,7 @@ use crate::{stub_waker, Stack};
 
 use super::StackState;
 
+/// Struct returned by [`Stack::enter`] determines how futures should be ran.
 pub struct Runner<'a, R> {
     pub(crate) stack: &'a Stack,
     pub(crate) _marker: PhantomData<R>,

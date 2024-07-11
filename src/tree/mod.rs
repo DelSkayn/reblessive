@@ -1,3 +1,5 @@
+//! A runtime which allows parallel running of branching futures.
+
 use crate::{defer::Defer, ptr::Owned, stack::StackMarker, Stack};
 use std::{
     cell::Cell,
@@ -13,7 +15,9 @@ mod stk;
 #[cfg(test)]
 mod test;
 
+pub use future::{ScopeFuture, StkFuture};
 use runner::Runner;
+pub use runner::{FinishFuture, StepFuture};
 use schedular::Schedular;
 pub use stk::Stk;
 
@@ -21,6 +25,7 @@ thread_local! {
     static TREE_PTR: Cell<Option<Owned<Schedular>>> = const { Cell::new(None) };
 }
 
+/// A runtime similar to [`Stack`] but allows running some futures in parallel
 pub struct TreeStack {
     root: Stack,
     schedular: Schedular,

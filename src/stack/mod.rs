@@ -1,7 +1,16 @@
+//! The stack runtime
+//!
+//! A runtime for turning recursive functions into a number of futures which are run from a single
+//! flattened loop, preventing stack overflows.
+//!
+//! This runtime also has support for external async function but it explicitly doesn't support
+//! intra-task concurrency, i.e. calling select or join on multiple futures at the same time. These
+//! types of patterns break the stack allocation pattern which this executor uses to be able to
+//! allocate and run futures efficiently.
+
 use crate::{
     allocator::StackAllocator,
-    map_ptr,
-    ptr::Owned,
+    ptr::{map_ptr, Owned},
     vtable::{TaskBox, VTable},
 };
 use std::{
@@ -18,6 +27,7 @@ mod stk;
 #[cfg(test)]
 mod test;
 
+pub use future::{StkFuture, YieldFuture};
 pub use runner::{FinishFuture, Runner, StepFuture};
 pub(crate) use stk::StackMarker;
 pub use stk::Stk;
@@ -29,7 +39,7 @@ thread_local! {
 type ResultPlace<T> = UnsafeCell<Option<T>>;
 
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
-pub enum StackState {
+pub(crate) enum StackState {
     NewTask,
     Base,
     Yield,
@@ -40,7 +50,7 @@ pub enum StackState {
 /// overflows on deeply nested futures. Only capable of running a single future at the same time
 /// and has no support for waking tasks by itself.
 pub struct Stack {
-    allocator: RefCell<StackAllocator>,
+    allocator: UnsafeCell<StackAllocator>,
     pub(crate) len: Cell<usize>,
     pub(crate) state: Cell<StackState>,
     async_context: Cell<usize>,
@@ -55,18 +65,7 @@ impl Stack {
     /// This function does not allocate.
     pub fn new() -> Self {
         Self {
-            allocator: RefCell::new(StackAllocator::new()),
-            len: Cell::new(0),
-            state: Cell::new(StackState::Base),
-            async_context: Cell::new(Owned::<u8>::dangling().addr().get()),
-        }
-    }
-
-    /// Create a new empty stack to run reblessive futures in with atleast cap bytes reserved for
-    /// future allocation.
-    pub fn with_capacity(cap: usize) -> Self {
-        Self {
-            allocator: RefCell::new(StackAllocator::with_capacity(cap)),
+            allocator: UnsafeCell::new(StackAllocator::new()),
             len: Cell::new(0),
             state: Cell::new(StackState::Base),
             async_context: Cell::new(Owned::<u8>::dangling().addr().get()),
@@ -99,10 +98,8 @@ impl Stack {
             "Stack still has unresolved futures, did a previous runner leak?"
         );
 
-        let place_ptr = self
-            .allocator
-            .borrow_mut()
-            .alloc_with::<ResultPlace<R>, _>(|| UnsafeCell::new(None));
+        let place_ptr =
+            (*self.allocator.get()).alloc_with::<ResultPlace<R>, _>(|| UnsafeCell::new(None));
 
         self.len.set(1);
 
@@ -136,13 +133,11 @@ impl Stack {
         unsafe { f(ptr.as_ref()) }
     }
 
-    fn alloc_future<F>(&self, f: F) -> Owned<TaskBox<u8>>
+    unsafe fn alloc_future<F>(&self, f: F) -> Owned<TaskBox<u8>>
     where
         F: Future<Output = ()>,
     {
-        let res = self
-            .allocator
-            .borrow_mut()
+        let res = (*self.allocator.get())
             .alloc_with(|| TaskBox {
                 v_table: VTable::get::<F>(),
                 future: f,
@@ -159,14 +154,14 @@ impl Stack {
     // tries to get the final result of the last allocation
     pub(crate) unsafe fn try_get_result<R>(&self) -> Option<R> {
         if self.len.get() == 1 {
-            let place_ptr = self.allocator.borrow().top().unwrap();
+            let place_ptr = (*self.allocator.get()).top().unwrap();
             let res = (*place_ptr.cast::<ResultPlace<R>>().as_ref().get()).take();
             assert!(
                 res.is_some(),
                 "Result was not writen even after all futures finished!",
             );
 
-            self.allocator.borrow_mut().pop_dealloc();
+            (*self.allocator.get()).pop_dealloc();
             self.len.set(0);
 
             return res;
@@ -176,7 +171,7 @@ impl Stack {
 
     pub(crate) unsafe fn drive_top_task(&self, context: &mut Context) -> Poll<bool> {
         self.enter_context(|| {
-            let task = self.allocator.borrow().top().unwrap().cast::<TaskBox<u8>>();
+            let task = (*self.allocator.get()).top().unwrap().cast::<TaskBox<u8>>();
             let r = Self::drive_task(task, context);
             match r {
                 Poll::Ready(_) => {
@@ -225,9 +220,9 @@ impl Stack {
     }
 
     pub(crate) unsafe fn pop_task(&self) {
-        let task = self.allocator.borrow().top().unwrap().cast::<TaskBox<u8>>();
+        let task = (*self.allocator.get()).top().unwrap().cast::<TaskBox<u8>>();
         Self::drop_task_inline(task);
-        self.allocator.borrow_mut().pop_dealloc();
+        (*self.allocator.get()).pop_dealloc();
         self.len.set(self.len.get() - 1);
     }
 
@@ -267,7 +262,7 @@ impl Stack {
 
         // Clear all the futures
         self.enter_context(|| {
-            let mut borrow = self.allocator.borrow_mut();
+            let borrow = &mut (*self.allocator.get());
             for _ in 1..self.len.get() {
                 unsafe { Self::drop_task_inline(borrow.top().unwrap().cast()) }
                 borrow.pop_dealloc();
@@ -278,12 +273,12 @@ impl Stack {
         // produced a result, so we need to take the possible result out of final pointer to run
         // it's drop, if any
         if std::mem::needs_drop::<R>() && self.len.get() <= 2 {
-            let place_ptr = self.allocator.borrow().top().unwrap();
+            let place_ptr = (*self.allocator.get()).top().unwrap();
             (*place_ptr.cast::<UnsafeCell<Option<R>>>().as_ref().get()).take();
         }
 
         // Deallocate the result allocation.
-        self.allocator.borrow_mut().pop_dealloc();
+        (*self.allocator.get()).pop_dealloc();
         // reset len since the stack is now empty.
         self.len.set(0);
     }

@@ -15,7 +15,10 @@ mod queue;
 mod waker;
 use queue::Queue;
 
-use crate::{defer::Defer, map_ptr, ptr::Owned};
+use crate::{
+    defer::Defer,
+    ptr::{map_ptr, Owned},
+};
 
 use self::queue::NodeHeader;
 
