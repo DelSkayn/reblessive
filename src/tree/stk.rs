@@ -26,12 +26,20 @@ impl StackMarker for Stk {
 
 impl Stk {
     /// Run a new future in the runtime.
-    pub fn run<'a, F, Fut, R>(&'a mut self, f: F) -> StkFuture<'a, F, R>
+    pub fn run<'a, F, Fut, R>(&'a mut self, f: F) -> impl Future<Output = R> + 'a
     where
         F: FnOnce(&'a mut Stk) -> Fut,
         Fut: Future<Output = R> + 'a,
+        R: 'a,
     {
-        StkFuture(InnerStkFuture::new(f))
+        #[cfg(not(feature = "bypass"))]
+        {
+            StkFuture(InnerStkFuture::new(f))
+        }
+        #[cfg(feature = "bypass")]
+        {
+            unsafe { Box::pin(f(Stk::create())) }
+        }
     }
 
     /// A less type-safe version of Stk::run which doesn't require passing arround a Stk object.
@@ -42,13 +50,20 @@ impl Stk {
     /// The future returned by this function will panic if another stack futures is created which
     /// is not contained within the future returned by this function while the current future is
     /// still running
-    pub fn enter_run<'a, F, Fut, R>(f: F) -> StkFuture<'a, F, R>
+    pub fn enter_run<'a, F, Fut, R>(f: F) -> impl Future<Output = R> + 'a
     where
         F: FnOnce(&'a mut Stk) -> Fut,
         Fut: Future<Output = R> + 'a,
     {
         Stack::with_context(|_| ());
-        StkFuture(InnerStkFuture::new(f))
+        #[cfg(not(feature = "bypass"))]
+        {
+            StkFuture(InnerStkFuture::new(f))
+        }
+        #[cfg(feature = "bypass")]
+        {
+            unsafe { Box::pin(f(Stk::create())) }
+        }
     }
 
     /// Yield the execution of the recursive futures back to the reblessive runtime.
@@ -60,12 +75,19 @@ impl Stk {
     }
 
     /// Create a scope in which multiple reblessive futures can be polled at the same time.
-    pub fn scope<'a, F, Fut, R>(&'a mut self, f: F) -> ScopeFuture<'a, F, R>
+    pub fn scope<'a, F, Fut, R>(&'a mut self, f: F) -> impl Future<Output = R> + 'a
     where
         F: FnOnce(&'a ScopeStk) -> Fut,
         Fut: Future<Output = R> + 'a,
     {
-        ScopeFuture::new(f)
+        #[cfg(not(feature = "bypass"))]
+        {
+            ScopeFuture::new(f)
+        }
+        #[cfg(feature = "bypass")]
+        {
+            unsafe { Box::pin(f(ScopeStk::new())) }
+        }
     }
 }
 
@@ -84,13 +106,20 @@ impl ScopeStk {
 
 impl ScopeStk {
     /// Run a new future in the runtime.
-    pub fn run<'a, F, Fut, R>(&'a self, f: F) -> ScopeStkFuture<'a, R>
+    pub fn run<'a, F, Fut, R>(&'a self, f: F) -> impl Future<Output = R> + 'a
     where
         F: FnOnce(&'a mut Stk) -> Fut,
         Fut: Future<Output = R> + 'a,
     {
-        let future = unsafe { f(Stk::create()) };
+        #[cfg(not(feature = "bypass"))]
+        {
+            let future = unsafe { f(Stk::create()) };
 
-        ScopeStkFuture::new(future)
+            ScopeStkFuture::new(future)
+        }
+        #[cfg(feature = "bypass")]
+        {
+            unsafe { Box::pin(f(Stk::create())) }
+        }
     }
 }

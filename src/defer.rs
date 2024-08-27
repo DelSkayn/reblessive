@@ -15,11 +15,6 @@ impl<T, F: FnOnce(&mut T)> Defer<T, F> {
             f: Some(func),
         }
     }
-
-    pub fn take(mut self) -> T {
-        self.f = None;
-        unsafe { ManuallyDrop::take(&mut self.value) }
-    }
 }
 
 impl<T, F: FnOnce(&mut T)> Deref for Defer<T, F> {
