@@ -36,6 +36,10 @@ impl<T> Owned<T> {
     pub unsafe fn read(&self) -> T {
         self.ptr.as_ptr().read()
     }
+
+    pub unsafe fn replace(&self, v: T) -> T {
+        std::ptr::replace(self.as_ptr(), v)
+    }
 }
 
 impl<T> From<&T> for Owned<T> {
@@ -159,6 +163,35 @@ macro_rules! impl_base_methods {
                 }
             }
 
+            pub fn expose_provenance(self) -> NonZeroUsize{
+                #[cfg(feature = "nightly")]
+                {
+                    unsafe{ NonZeroUsize::new_unchecked(self.ptr.as_ptr().expose_provenance()) }
+                }
+                #[cfg(not(feature = "nightly"))]
+                {
+                    unsafe{ NonZeroUsize::new_unchecked(self.ptr.as_ptr() as usize) }
+                }
+            }
+
+            pub fn from_exposed_addr(addr: NonZeroUsize) -> Self{
+                #[cfg(feature = "nightly")]
+                {
+                    Self{
+                        ptr: unsafe{ NonNull::new_unchecked(std::ptr::with_exposed_provenance_mut(addr.get())) },
+                        _marker: PhantomData,
+                    }
+                }
+                #[cfg(not(feature = "nightly"))]
+                {
+
+                    Self{
+                        ptr: unsafe{ NonNull::new_unchecked(addr.get() as *mut $gen) },
+                        _marker: PhantomData,
+                    }
+                }
+            }
+
             pub fn map_addr<F>(self, f: F) -> Self
             where F: FnOnce(NonZeroUsize) -> NonZeroUsize
             {
@@ -171,8 +204,8 @@ macro_rules! impl_base_methods {
                     }
                 }
                 #[cfg(not(feature = "nightly"))]
-                unsafe {
-                    Self::from_ptr_unchecked(f(NonZeroUsize::new_unchecked(self.ptr.as_ptr() as usize)).get() as *mut $gen)
+                {
+                    Self::from_exposed_addr(f(self.expose_provenance()))
                 }
             }
 
@@ -187,7 +220,7 @@ macro_rules! impl_base_methods {
                 }
                 #[cfg(not(feature = "nightly"))]
                 {
-                    Self::from_ptr_unchecked(f(self.ptr.as_ptr() as usize) as *mut $gen)
+                    Self::from_exposed_addr(NonZeroUsize::new_unchecked(f(self.expose_provenance().get())))
                 }
             }
 
