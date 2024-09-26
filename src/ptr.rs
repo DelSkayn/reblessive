@@ -37,6 +37,7 @@ impl<T> Owned<T> {
         self.ptr.as_ptr().read()
     }
 
+    #[cfg(feature = "tree")]
     pub unsafe fn replace(&self, v: T) -> T {
         std::ptr::replace(self.as_ptr(), v)
     }

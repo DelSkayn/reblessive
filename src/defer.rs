@@ -16,6 +16,7 @@ impl<T, F: FnOnce(&mut T)> Defer<T, F> {
         }
     }
 
+    #[allow(dead_code)]
     pub fn take(mut self) -> T {
         self.f = None;
         unsafe { ManuallyDrop::take(&mut self.value) }
