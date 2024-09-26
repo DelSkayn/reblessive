@@ -617,21 +617,81 @@ fn drop_mid_run() {
     }
 }
 
-/*
 #[test]
-fn forget_mid_run() {
-    async fn fibbo(stk: &mut Stk, f: usize) -> usize {
-        match f {
-            0 | 1 => 1,
-            x => stk.run(|stk| fibbo(stk, x - 1)).await + stk.run(|stk| fibbo(stk, x - 2)).await,
+fn test_bigger_alignment_with_small_capacity() {
+    #[repr(align(32))]
+    struct U256(u128, u128);
+
+    struct Rand(u32);
+
+    impl Rand {
+        fn new() -> Self {
+            Rand(0x194b93c)
+        }
+
+        fn next(&mut self) -> u32 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            self.0 = x;
+            x
         }
     }
 
-    let mut stack = Stack::new();
-    let mut runner = stack.enter(|stk| fibbo(stk, 40));
-    for _ in 0..1000 {
-        assert!(runner.step().is_none());
+    async fn count_u16(stk: &mut Stk, rand: &mut Rand, depth: usize) -> usize {
+        let mut v = rand.next() as u16;
+        if depth == 0 {
+            return v as usize;
+        }
+        // make sure that v is placed onto the stack.
+        std::hint::black_box(&mut v);
+        let c = match rand.next() % 3 {
+            0 => stk.run(|stk| count_u16(stk, rand, depth - 1)).await as u16,
+            1 => stk.run(|stk| count_u128(stk, rand, depth - 1)).await as u16,
+            2 => stk.run(|stk| count_u256(stk, rand, depth - 1)).await as u16,
+            _ => unreachable!(),
+        };
+        v.wrapping_add(c) as usize
     }
-    std::mem::forget(runner);
+
+    async fn count_u128(stk: &mut Stk, rand: &mut Rand, depth: usize) -> usize {
+        let mut v = rand.next() as u128;
+        if depth == 0 {
+            return v as usize;
+        }
+        // make sure that v is placed onto the stack.
+        std::hint::black_box(&mut v);
+        let c = match rand.next() % 3 {
+            0 => stk.run(|stk| count_u16(stk, rand, depth - 1)).await as u128,
+            1 => stk.run(|stk| count_u128(stk, rand, depth - 1)).await as u128,
+            2 => stk.run(|stk| count_u256(stk, rand, depth - 1)).await as u128,
+            _ => unreachable!(),
+        };
+        v.wrapping_add(c) as usize
+    }
+
+    async fn count_u256(stk: &mut Stk, rand: &mut Rand, depth: usize) -> usize {
+        let mut v = U256(rand.next() as u128, 120203);
+        if depth == 0 {
+            return v.0 as usize;
+        }
+        // make sure that v is placed onto the stack.
+        std::hint::black_box(&mut v);
+        std::hint::black_box(v.1);
+        let c = match rand.next() % 3 {
+            0 => stk.run(|stk| count_u16(stk, rand, depth - 1)).await as u128,
+            1 => stk.run(|stk| count_u128(stk, rand, depth - 1)).await as u128,
+            2 => stk.run(|stk| count_u256(stk, rand, depth - 1)).await as u128,
+            _ => unreachable!(),
+        };
+        v.0.wrapping_add(c) as usize
+    }
+
+    let mut rand = Rand::new();
+    let mut stack = Stack::new();
+    let depth = if cfg!(miri) { 16 } else { 1024 };
+    stack
+        .enter(|stk| count_u128(stk, &mut rand, depth))
+        .finish();
 }
-*/
