@@ -2,6 +2,7 @@ use futures_util::future::join_all;
 
 use super::{Stk, TreeStack};
 use crate::{
+    defer::Defer,
     test::{run_with_stack_size, thread_sleep, ManualPoll, KB, MB},
     tree::stk::ScopeStk,
 };
@@ -15,10 +16,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-thread_local! {
-    static COUNTER: Cell<usize> = const{ Cell::new(0) };
-}
-
 async fn fanout<'a, F, Fut, R>(stk: &'a mut Stk, count: usize, f: F) -> Vec<R>
 where
     F: Fn(&'a mut Stk) -> Fut + 'a,
@@ -26,12 +23,9 @@ where
     R: 'a,
 {
     let r = stk.scope(|stk| async move {
-        let futures = (0..count)
-            .map(|_| stk.run(|stk| f(stk)))
-            .collect::<Vec<_>>();
+        let futures = (0..count).map(|_| stk.run(&f)).collect::<Vec<_>>();
 
-        let r = futures_util::future::join_all(futures).await;
-        r
+        futures_util::future::join_all(futures).await
     });
 
     r.await
@@ -39,6 +33,10 @@ where
 
 #[test]
 fn basic() {
+    thread_local! {
+        static COUNTER: Cell<usize> = const{ Cell::new(0) };
+    }
+
     pollster::block_on(async {
         let mut stack = TreeStack::new();
 
@@ -63,6 +61,10 @@ fn basic() {
 
 #[test]
 fn two_depth() {
+    thread_local! {
+        static COUNTER: Cell<usize> = const{ Cell::new(0) };
+    }
+
     pollster::block_on(async {
         let mut stack = TreeStack::new();
 
@@ -89,6 +91,10 @@ fn two_depth() {
 
 #[test]
 fn basic_then_deep() {
+    thread_local! {
+        static COUNTER: Cell<usize> = const{ Cell::new(0) };
+    }
+
     pollster::block_on(async {
         let mut stack = TreeStack::new();
 
@@ -120,6 +126,10 @@ fn basic_then_deep() {
 
 #[test]
 fn two_depth_step() {
+    thread_local! {
+        static COUNTER: Cell<usize> = const{ Cell::new(0) };
+    }
+
     pollster::block_on(async {
         let mut stack = TreeStack::new();
 
@@ -211,23 +221,29 @@ fn deep_no_overflow() {
 
 #[test]
 fn cancel_scope_future() {
+    thread_local! {
+        static COUNTER: Cell<usize> = const{ Cell::new(0) };
+    }
+
     pollster::block_on(async {
         let mut stack = TreeStack::new();
         stack
             .enter(|stk| async {
                 let scope = stk.scope(|stk| async {
                     stk.run(|stk| async {
+                        let _defer = Defer::new((), |_| COUNTER.set(1));
                         stk.yield_now().await;
-                        // future should be canceled before this point
-                        panic!();
+                        let _defer = Defer::new((), |_| {
+                            COUNTER.set(2);
+                        });
                     })
                     .await
                 });
 
-                let mut first = true;
+                let mut count = 0;
                 ManualPoll::wrap(scope, move |future, ctx| {
-                    if first {
-                        first = false;
+                    if count < 1 {
+                        count += 1;
 
                         assert!(matches!(future.poll(ctx), Poll::Pending));
                         Poll::Pending
@@ -235,17 +251,75 @@ fn cancel_scope_future() {
                         // first poll done, return read so we can cancel it.
                         Poll::Ready(())
                     }
-                });
+                })
+                .await;
                 stk.yield_now().await;
             })
             .finish()
             .await;
+
+        assert_eq!(COUNTER.get(), 1)
     });
+}
+
+#[test]
+fn drop_task_mid_run() {
+    thread_local! {
+        static COUNTER: Cell<usize> = const{ Cell::new(0) };
+        static TOTAL: Cell<usize> = const{ Cell::new(0) };
+    }
+
+    pollster::block_on(async {
+        let mut stack = TreeStack::new();
+        let future = stack
+            .enter(|stk| async {
+                COUNTER.set(COUNTER.get() + 1);
+                TOTAL.set(TOTAL.get() + 1);
+                let _defer = Defer::new((), |_| {
+                    COUNTER.set(COUNTER.get() - 1);
+                });
+
+                stk.run(|stk| {
+                    fanout(stk, 10, |stk| {
+                        stk.run(|stk| {
+                            fanout(stk, 5, |_| async {
+                                COUNTER.set(COUNTER.get() + 1);
+                                TOTAL.set(TOTAL.get() + 1);
+                                let _defer = Defer::new((), |_| {
+                                    COUNTER.set(COUNTER.get() - 1);
+                                });
+                                ManualPoll::wrap((), |_, _| Poll::Pending).await;
+                                unreachable!();
+                            })
+                        })
+                    })
+                })
+                .await;
+
+                unreachable!();
+            })
+            .finish();
+
+        ManualPoll::wrap(future, |mut f, ctx| {
+            for _ in 0..(10 * 5 * 2) {
+                let _ = f.as_mut().poll(ctx);
+            }
+            Poll::Ready(())
+        })
+        .await;
+    });
+
+    assert_eq!(COUNTER.get(), 0);
+    assert_eq!(TOTAL.get(), 10 * 5 + 1)
 }
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn tokio_sleep_depth() {
+    thread_local! {
+        static COUNTER: Cell<usize> = const{ Cell::new(0) };
+    }
+
     COUNTER.with(|x| x.set(0));
     let mut stack = TreeStack::new();
 
@@ -297,23 +371,19 @@ async fn read_files() {
                     });
                     r.push(f)
                 }
+            } else if OPEN_COUNT.load(Ordering::Relaxed) > MAX_OPEN {
+                let str = stk
+                    .run(|_| async { tokio::fs::read_to_string(path).await.unwrap_or_default() })
+                    .await;
+                buf.push_str(&str);
             } else {
-                if OPEN_COUNT.load(Ordering::Relaxed) > MAX_OPEN {
-                    let str = stk
-                        .run(|_| async {
-                            tokio::fs::read_to_string(path).await.unwrap_or_default()
-                        })
-                        .await;
-                    buf.push_str(&str);
-                } else {
-                    OPEN_COUNT.fetch_add(1, Ordering::Relaxed);
-                    let f = stk.run(|_| async {
-                        let r = tokio::fs::read_to_string(path).await.unwrap_or_default();
-                        OPEN_COUNT.fetch_sub(1, Ordering::Relaxed);
-                        r
-                    });
-                    r.push(f)
-                }
+                OPEN_COUNT.fetch_add(1, Ordering::Relaxed);
+                let f = stk.run(|_| async {
+                    let r = tokio::fs::read_to_string(path).await.unwrap_or_default();
+                    OPEN_COUNT.fetch_sub(1, Ordering::Relaxed);
+                    r
+                });
+                r.push(f)
             }
         }
         let mut str = join_all(r).await.join("\n=========\n");
@@ -360,23 +430,19 @@ async fn read_files_stepping() {
                     });
                     r.push(f)
                 }
+            } else if OPEN_COUNT.load(Ordering::Relaxed) > MAX_OPEN {
+                let str = stk
+                    .run(|_| async { tokio::fs::read_to_string(path).await.unwrap_or_default() })
+                    .await;
+                buf.push_str(&str);
             } else {
-                if OPEN_COUNT.load(Ordering::Relaxed) > MAX_OPEN {
-                    let str = stk
-                        .run(|_| async {
-                            tokio::fs::read_to_string(path).await.unwrap_or_default()
-                        })
-                        .await;
-                    buf.push_str(&str);
-                } else {
-                    OPEN_COUNT.fetch_add(1, Ordering::Relaxed);
-                    let f = stk.run(|_| async {
-                        let r = tokio::fs::read_to_string(path).await.unwrap_or_default();
-                        OPEN_COUNT.fetch_sub(1, Ordering::Relaxed);
-                        r
-                    });
-                    r.push(f)
-                }
+                OPEN_COUNT.fetch_add(1, Ordering::Relaxed);
+                let f = stk.run(|_| async {
+                    let r = tokio::fs::read_to_string(path).await.unwrap_or_default();
+                    OPEN_COUNT.fetch_sub(1, Ordering::Relaxed);
+                    r
+                });
+                r.push(f)
             }
         }
         let mut str = join_all(r).await.join("\n=========\n");
@@ -390,8 +456,7 @@ async fn read_files_stepping() {
     });
 
     loop {
-        if let Some(_) = runner.step().await {
-            //println!("{}", x);
+        if runner.step().await.is_some() {
             break;
         }
     }

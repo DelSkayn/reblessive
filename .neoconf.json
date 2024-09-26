@@ -1,0 +1,10 @@
+{
+    "lspconfig": {
+        "rust_analyzer": {
+            "rust-analyzer.cargo.features": [
+                "tree"
+            ],
+            "rust-analyzer.check.command": "clippy"
+        }
+    }
+}

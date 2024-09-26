@@ -48,8 +48,10 @@ pub(crate) enum StackState {
 }
 
 /// A small minimal runtime for executing futures flattened onto the heap preventing stack
-/// overflows on deeply nested futures. Only capable of running a single future at the same time
-/// and has no support for waking tasks by itself.
+/// overflows on deeply nested futures.
+///
+/// Only capable of running a single future at the same time and has no support for waking
+/// tasks by itself.
 pub struct Stack {
     allocator: UnsafeCell<StackAllocator>,
     pub(crate) len: Cell<usize>,
@@ -253,15 +255,18 @@ impl Stack {
     }
 
     pub(crate) unsafe fn clear<R>(&self) {
-        if self.len.get() == 0 {
+        let len = self.len.get();
+        if len == 0 {
             // No tasks pushed, nothing to be done.
             return;
         }
 
+        self.state.set(StackState::Cancelled);
+
         // Clear all the futures
         self.enter_context(|| {
             let borrow = &mut (*self.allocator.get());
-            for _ in 1..self.len.get() {
+            for _ in (1..len).rev() {
                 unsafe { Self::drop_task_inline(borrow.top().unwrap().cast()) }
                 borrow.pop_dealloc();
             }
@@ -270,7 +275,7 @@ impl Stack {
         // If the count was less then or equal to 2 it means that the final future might have
         // produced a result, so we need to take the possible result out of final pointer to run
         // it's drop, if any
-        if std::mem::needs_drop::<R>() && self.len.get() <= 2 {
+        if std::mem::needs_drop::<R>() && len <= 2 {
             let place_ptr = (*self.allocator.get()).top().unwrap();
             (*place_ptr.cast::<UnsafeCell<Option<R>>>().as_ref().get()).take();
         }
@@ -279,6 +284,7 @@ impl Stack {
         (*self.allocator.get()).pop_dealloc();
         // reset len since the stack is now empty.
         self.len.set(0);
+        self.state.set(StackState::Base);
     }
 }
 

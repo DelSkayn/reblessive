@@ -128,11 +128,17 @@ macro_rules! impl_base_methods {
             }
 
             pub unsafe fn add(self, offset: usize) -> Self{
-                self.map_addr(|x| NonZeroUsize::new_unchecked(x.get() + offset))
+                Self{
+                    ptr: NonNull::new_unchecked(self.ptr.as_ptr().add(offset)),
+                    _marker: PhantomData
+                }
             }
 
             pub unsafe fn sub(self, offset: usize) -> Self{
-                self.map_addr(|x| NonZeroUsize::new_unchecked(x.get() - offset))
+                Self{
+                    ptr: NonNull::new_unchecked(self.ptr.as_ptr().sub(offset)),
+                    _marker: PhantomData
+                }
             }
 
             pub unsafe fn offset_from(self, other: $ty<$gen>) -> isize{
@@ -163,52 +169,6 @@ macro_rules! impl_base_methods {
                 }
             }
 
-            pub fn expose_provenance(self) -> NonZeroUsize{
-                #[cfg(feature = "nightly")]
-                {
-                    unsafe{ NonZeroUsize::new_unchecked(self.ptr.as_ptr().expose_provenance()) }
-                }
-                #[cfg(not(feature = "nightly"))]
-                {
-                    unsafe{ NonZeroUsize::new_unchecked(self.ptr.as_ptr() as usize) }
-                }
-            }
-
-            pub fn from_exposed_addr(addr: NonZeroUsize) -> Self{
-                #[cfg(feature = "nightly")]
-                {
-                    Self{
-                        ptr: unsafe{ NonNull::new_unchecked(std::ptr::with_exposed_provenance_mut(addr.get())) },
-                        _marker: PhantomData,
-                    }
-                }
-                #[cfg(not(feature = "nightly"))]
-                {
-
-                    Self{
-                        ptr: unsafe{ NonNull::new_unchecked(addr.get() as *mut $gen) },
-                        _marker: PhantomData,
-                    }
-                }
-            }
-
-            pub fn map_addr<F>(self, f: F) -> Self
-            where F: FnOnce(NonZeroUsize) -> NonZeroUsize
-            {
-                #[cfg(feature = "nightly")]
-                {
-                    unsafe{
-                        Self::from_ptr_unchecked(self.ptr.as_ptr().map_addr(|x| {
-                        f(NonZeroUsize::new_unchecked(x)).get()
-                    }))
-                    }
-                }
-                #[cfg(not(feature = "nightly"))]
-                {
-                    Self::from_exposed_addr(f(self.expose_provenance()))
-                }
-            }
-
             pub unsafe fn map_addr_unchecked<F>(self, f: F) -> Self
             where F: FnOnce(usize) -> usize
             {
@@ -220,7 +180,13 @@ macro_rules! impl_base_methods {
                 }
                 #[cfg(not(feature = "nightly"))]
                 {
-                    Self::from_exposed_addr(NonZeroUsize::new_unchecked(f(self.expose_provenance().get())))
+                    unsafe{
+                        let ptr = f(self.addr().get()) as *mut $gen;
+                        Self{
+                            ptr: NonNull::new_unchecked(ptr),
+                            _marker: PhantomData
+                        }
+                    }
                 }
             }
 

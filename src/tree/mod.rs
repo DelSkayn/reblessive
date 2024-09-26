@@ -42,7 +42,7 @@ impl TreeStack {
         }
     }
 
-    pub fn enter<'a, F, Fut, R>(&'a mut self, f: F) -> Runner<R>
+    pub fn enter<'a, F, Fut, R>(&'a mut self, f: F) -> Runner<'a, R>
     where
         F: FnOnce(&'a mut Stk) -> Fut,
         Fut: Future<Output = R> + 'a,
