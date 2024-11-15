@@ -6,7 +6,7 @@ use crate::{
         future::{InnerStkFuture, YieldFuture},
         StackMarker,
     },
-    Stack, TreeStack,
+    TreeStack,
 };
 
 use crate::tree::future::StkFuture;
@@ -47,7 +47,8 @@ impl Stk {
         F: FnOnce(&'a mut Stk) -> Fut,
         Fut: Future<Output = R> + 'a,
     {
-        Stack::with_context(|_| ());
+        // Check if this is being run in the right context
+        TreeStack::with_context(|_| ());
         StkFuture(InnerStkFuture::new(f))
     }
 
@@ -65,6 +66,21 @@ impl Stk {
         F: FnOnce(&'a ScopeStk) -> Fut,
         Fut: Future<Output = R> + 'a,
     {
+        ScopeFuture::new(f)
+    }
+
+    /// A less type-safe version of Stk::scope which doesn't require passing arround a Stk object.
+    /// Invalid use of this function can cause a panic or deadlocking an executor.
+    ///
+    /// # Panic
+    /// This function will panic while not within a TreeStack
+    pub fn enter_scope<'a, F, Fut, R>(f: F) -> ScopeFuture<'a, F, R>
+    where
+        F: FnOnce(&'a ScopeStk) -> Fut,
+        Fut: Future<Output = R> + 'a,
+    {
+        // Check if this is being run in the right context
+        TreeStack::with_context(|_| ());
         ScopeFuture::new(f)
     }
 }

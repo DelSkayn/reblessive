@@ -196,29 +196,6 @@ impl Schedular {
         self.all_next.get().is_none()
     }
 
-    /*
-    /// # Safety
-    /// This function erases any lifetime associated with the future.
-    /// Caller must ensure that either the future completes or is dropped before the lifetime
-    pub unsafe fn push<F>(&self, f: F)
-    where
-        F: Future<Output = ()>,
-    {
-        let queue = Arc::downgrade(&self.should_poll);
-
-        let task = Arc::new(Task::new(queue, f));
-        // One count for the all list and one for the should_poll list.
-        let task = Owned::from_ptr_unchecked(Arc::into_raw(task) as *mut Task<F>);
-        Arc::increment_strong_count(task.as_ptr());
-        let task = task.cast::<Task<u8>>();
-
-        self.push_task_to_all(task);
-
-        Pin::new_unchecked(&*self.should_poll).push(task.cast());
-        self.len.set(self.len.get() + 1);
-    }
-    */
-
     /// # Safety
     /// This function erases any lifetime associated with the future.
     /// Caller must ensure that either the future completes or is dropped before the lifetime
@@ -374,7 +351,7 @@ impl Schedular {
                     // Nothing todo the defer will remove the task from the list.
                 }
                 Poll::Pending => {
-                    // Future is still pending so prefent the defer drop from running.
+                    // Future is still pending so prevent the defer drop from running.
                     remove.take();
 
                     // check if we should yield back to the parent schedular because a future

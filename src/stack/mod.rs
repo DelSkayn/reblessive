@@ -41,10 +41,14 @@ type ResultPlace<T> = UnsafeCell<Option<T>>;
 
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
 pub(crate) enum StackState {
-    NewTask,
+    /// Initial stack state
     Base,
+    /// A future requested a that the executor yield
     Yield,
+    /// The pending tasks in the executor are being canceled.  
     Cancelled,
+    /// A new task was created, execution should switch to the new task
+    NewTask,
 }
 
 /// A small minimal runtime for executing futures flattened onto the heap preventing stack

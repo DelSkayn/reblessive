@@ -49,7 +49,7 @@ pub struct ScopeFuture<'a, F, R> {
     _pin_marker: PhantomPinned,
 }
 
-impl<'a, F, R> ScopeFuture<'a, F, R> {
+impl<F, R> ScopeFuture<'_, F, R> {
     pub(crate) fn new(f: F) -> Self {
         ScopeFuture {
             state: ScopeFutureState::Initial(f),
@@ -157,7 +157,7 @@ impl<R> ScopeStkFuture<'_, R> {
     }
 }
 
-impl<'a, R> Future for ScopeStkFuture<'a, R> {
+impl<R> Future for ScopeStkFuture<'_, R> {
     type Output = R;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {

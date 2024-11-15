@@ -13,7 +13,7 @@ pub struct FinishFuture<'a, R> {
     _marker: PhantomData<R>,
 }
 
-impl<'a, R> Future for FinishFuture<'a, R> {
+impl<R> Future for FinishFuture<'_, R> {
     type Output = R;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -38,7 +38,7 @@ pub struct StepFuture<'a, R> {
     _marker: PhantomData<R>,
 }
 
-impl<'a, R> Future for StepFuture<'a, R> {
+impl<R> Future for StepFuture<'_, R> {
     type Output = Option<R>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -61,8 +61,8 @@ pub struct Runner<'a, R> {
     _marker: PhantomData<R>,
 }
 
-unsafe impl<'a, R> Send for Runner<'a, R> {}
-unsafe impl<'a, R> Sync for Runner<'a, R> {}
+unsafe impl<R> Send for Runner<'_, R> {}
+unsafe impl<R> Sync for Runner<'_, R> {}
 
 impl<'a, R> Runner<'a, R> {
     pub(crate) fn new(runner: &'a TreeStack) -> Self {
@@ -89,7 +89,7 @@ impl<'a, R> Runner<'a, R> {
     }
 }
 
-impl<'a, R> Drop for Runner<'a, R> {
+impl<R> Drop for Runner<'_, R> {
     fn drop(&mut self) {
         self.stack.schedular.clear();
         unsafe {

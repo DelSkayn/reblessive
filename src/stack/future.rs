@@ -24,7 +24,7 @@ pub(crate) struct InnerStkFuture<'a, F, R, M> {
     pub(crate) _marker: PhantomData<&'a mut M>,
 }
 
-impl<'a, F, R, M> InnerStkFuture<'a, F, R, M> {
+impl<F, R, M> InnerStkFuture<'_, F, R, M> {
     pub fn new(f: F) -> Self {
         InnerStkFuture {
             state: StkFutureState::Initial(f),
@@ -98,7 +98,7 @@ where
     }
 }
 
-impl<'a, F, R, M> Drop for InnerStkFuture<'a, F, R, M> {
+impl<F, R, M> Drop for InnerStkFuture<'_, F, R, M> {
     fn drop(&mut self) {
         match self.state {
             // Never polled
