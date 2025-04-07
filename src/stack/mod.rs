@@ -213,7 +213,6 @@ impl Stack {
     where
         F: Future<Output = ()>,
     {
-        std::io::stdout().flush().unwrap();
         let old = self.state.replace(StackState::NewTask);
         assert_eq!(
             old,
