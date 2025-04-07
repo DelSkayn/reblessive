@@ -17,7 +17,6 @@ use crate::{
 use std::{
     cell::{Cell, UnsafeCell},
     future::Future,
-    io::Write,
     marker::PhantomData,
     task::{Context, Poll},
 };

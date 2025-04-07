@@ -112,7 +112,7 @@ async fn parse(
                 while bytes.get(0).copied().map(is_number_char).unwrap_or(false) {
                     let c = bytes.next().unwrap();
                     number.push(c as char);
-                    if c.to_ascii_lowercase() == b'e' {
+                    if c.eq_ignore_ascii_case(&b'e') {
                         let n = bytes.get(0).copied();
                         if matches!(n, Some(b'-' | b'+')) {
                             bytes.next();

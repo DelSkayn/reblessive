@@ -160,35 +160,13 @@ macro_rules! impl_base_methods {
             }
 
             pub fn addr(self) -> NonZeroUsize{
-                #[cfg(feature = "nightly")]
-                {
-                    unsafe{ NonZeroUsize::new_unchecked(self.ptr.as_ptr().addr()) }
-                }
-                #[cfg(not(feature = "nightly"))]
-                {
-                    unsafe{ NonZeroUsize::new_unchecked(self.ptr.as_ptr() as usize) }
-                }
+                unsafe{ NonZeroUsize::new_unchecked(self.ptr.as_ptr().addr()) }
             }
 
             pub unsafe fn map_addr_unchecked<F>(self, f: F) -> Self
             where F: FnOnce(usize) -> usize
             {
-                #[cfg(feature = "nightly")]
-                {
-                    unsafe{
-                        Self::from_ptr_unchecked(self.ptr.as_ptr().map_addr(f))
-                    }
-                }
-                #[cfg(not(feature = "nightly"))]
-                {
-                    unsafe{
-                        let ptr = f(self.addr().get()) as *mut $gen;
-                        Self{
-                            ptr: NonNull::new_unchecked(ptr),
-                            _marker: PhantomData
-                        }
-                    }
-                }
+                unsafe{ Self::from_ptr_unchecked(self.ptr.as_ptr().map_addr(f)) }
             }
 
         }

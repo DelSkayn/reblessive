@@ -1,6 +1,4 @@
 #![cfg_attr(docrs, feature(doc_cfg))]
-#![cfg_attr(feature = "nightly", feature(strict_provenance))]
-#![cfg_attr(feature = "nightly", feature(exposed_provenance))]
 
 mod allocator;
 mod defer;
