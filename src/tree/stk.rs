@@ -13,7 +13,7 @@ use crate::tree::future::StkFuture;
 
 use super::future::{ScopeFuture, ScopeStkFuture};
 
-/// A refernce back to stack from inside the running future.
+/// A reference back to stack from inside the running future.
 ///
 /// Used for spawning new futures onto the stack from a future running on the stack.
 pub struct Stk(PhantomData<*mut TreeStack>);
